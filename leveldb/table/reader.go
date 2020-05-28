@@ -633,6 +633,9 @@ func (r *Reader) readBlockCached(bh blockHandle, verifyChecksum, fillCache bool,
 				if err != nil {
 					return 0, nil
 				}
+				if metadata {
+					fmt.Println("index block", len(b.data), cap(b.data))
+				}
 				return cap(b.data), b
 			})
 		} else {
@@ -691,6 +694,7 @@ func (r *Reader) readFilterBlockCached(bh blockHandle, fillCache bool) (*filterB
 				if err != nil {
 					return 0, nil
 				}
+				fmt.Println("filter block", len(b.data), cap(b.data))
 				return cap(b.data), b
 			})
 		} else {
