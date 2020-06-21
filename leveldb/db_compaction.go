@@ -346,7 +346,7 @@ func (db *DB) memCompaction() {
 	}
 
 	// Trigger table compaction.
-	db.compTrigger(db.tcompCmdC)
+	// db.compTrigger(db.tcompCmdC)
 }
 
 type tableCompactionBuilder struct {
