@@ -265,6 +265,33 @@ func (db *DB) compactionCommit(name string, rec *sessionRecord) {
 	}, nil)
 }
 
+func (db *DB) pauseTableCompaction() {
+	var resumeCh <-chan struct{}
+noPause:
+	for {
+		select {
+		case resumeCh = <-db.tcompPauseSetC:
+			goto hasPause
+		case <-db.closeC:
+			return
+		}
+	}
+hasPause:
+	for {
+		select {
+		case ch := <-db.tcompPauseSetC:
+			if ch != nil {
+				panic("invalid resume channel")
+			}
+			resumeCh = nil
+			goto noPause
+		case db.tcompPauseC <- resumeCh:
+		case <-db.closeC:
+			return
+		}
+	}
+}
+
 func (db *DB) memCompaction() {
 	mdb := db.getFrozenMem()
 	if mdb == nil {
@@ -285,7 +312,7 @@ func (db *DB) memCompaction() {
 	// Pause table compaction.
 	resumeC := make(chan struct{})
 	select {
-	case db.tcompPauseC <- (chan<- struct{})(resumeC):
+	case db.tcompPauseSetC <- (<-chan struct{})(resumeC):
 	case <-db.compPerErrC:
 		close(resumeC)
 		resumeC = nil
@@ -338,11 +365,12 @@ func (db *DB) memCompaction() {
 	// Resume table compaction.
 	if resumeC != nil {
 		select {
-		case <-resumeC:
-			close(resumeC)
+		case db.tcompPauseSetC <- nil:
 		case <-db.closeC:
 			db.compactionExitTransact()
 		}
+		close(resumeC)
+		resumeC = nil
 	}
 
 	// Trigger table compaction.
@@ -661,9 +689,9 @@ func (db *DB) resumeWrite() bool {
 	return false
 }
 
-func (db *DB) pauseCompaction(ch chan<- struct{}) {
+func (db *DB) pauseCompaction(ch <-chan struct{}) {
 	select {
-	case ch <- struct{}{}:
+	case <-ch:
 	case <-db.closeC:
 		db.compactionExitTransact()
 	}
