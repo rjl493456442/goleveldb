@@ -481,3 +481,5 @@ func (s *session) flushManifest(rec *sessionRecord) (err error) {
 	s.recordCommited(rec)
 	return
 }
+
+// Compaction related utils

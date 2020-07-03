@@ -27,14 +27,7 @@ type version struct {
 	s  *session
 
 	levels []tFiles
-
-	// Level that should be compacted next and its compaction score.
-	// Score < 1 means compaction is not strictly needed. These fields
-	// are initialized by computeCompaction()
-	cLevel int
-	cScore float64
-
-	cSeek unsafe.Pointer
+	cSeek  unsafe.Pointer
 
 	closing  bool
 	ref      int
@@ -352,7 +345,23 @@ func (v *version) pickMemdbLevel(umin, umax []byte, maxLevel int) (level int) {
 	return
 }
 
-func (v *version) computeCompaction() {
+// computeCompaction calculates whether system needs table compaction.
+// All currently ongoing compactions will also be considered to pick
+// compaction.
+//
+// - If there is one level0 compaction running, then no more level0
+//   compaction should be recommended.
+// - If there are some compactions running in with source level N,
+//   then we hold the assumption these compactions will success eventually
+//   and all files involved in level N will be considered **removed**.
+// - If there are some compactions running in with source level N-1,
+//   then we hold the assumption these compactions will success eventually
+//   and all files involved in level N will be considered **unavailable**.
+//
+// After considering all ongoing compactions, if there still exists some
+// tables can be compacted without any overlap with existing compactions,
+// then return the relevant level.
+func (v *version) computeCompaction(comps *compactionByLevel) int {
 	// Precomputed best level for next compaction
 	bestLevel := int(-1)
 	bestScore := float64(-1)
@@ -363,22 +372,46 @@ func (v *version) computeCompaction() {
 	statTotSize := int64(0)
 
 	for level, tables := range v.levels {
-		var score float64
-		size := tables.size()
+		var (
+			score float64
+			size  = tables.size()
+			num   = len(tables)
+		)
 		if level == 0 {
-			// We treat level-0 specially by bounding the number of files
-			// instead of number of bytes for two reasons:
-			//
-			// (1) With larger write-buffer sizes, it is nice not to do too
-			// many level-0 compaction.
-			//
-			// (2) The files in level-0 are merged on every read and
-			// therefore we wish to avoid too many files when the individual
-			// file size is small (perhaps because of a small write-buffer
-			// setting, or very high compression ratios, or lots of
-			// overwrites/deletions).
-			score = float64(len(tables)) / float64(v.s.o.GetCompactionL0Trigger())
+			if cs := comps.get(0); len(cs) > 0 {
+				// If there is one level0 compaction running, don't pick anymore
+				// level0 compaction again.
+				score = float64(-2)
+				num -= cs[0].levels[0].Len()
+				size -= cs[0].levels[0].size()
+			} else {
+				// We treat level-0 specially by bounding the number of files
+				// instead of number of bytes for two reasons:
+				//
+				// (1) With larger write-buffer sizes, it is nice not to do too
+				// many level-0 compaction.
+				//
+				// (2) The files in level-0 are merged on every read and
+				// therefore we wish to avoid too many files when the individual
+				// file size is small (perhaps because of a small write-buffer
+				// setting, or very high compression ratios, or lots of
+				// overwrites/deletions).
+				score = float64(num) / float64(v.s.o.GetCompactionL0Trigger())
+			}
 		} else {
+			// If there are a few compaction involves the tables in this level,
+			// ignore them now. Seems these tables can't be picked for compaction
+			// before these compactions finish.
+			cs := comps.get(level)
+			for _, comp := range cs {
+				size -= comp.levels[0].size()
+				num -= comp.levels[0].Len()
+			}
+			cs = comps.get(level - 1)
+			for _, comp := range cs {
+				size -= comp.levels[1].size()
+				num -= comp.levels[1].Len()
+			}
 			score = float64(size) / float64(v.s.o.GetCompactionTotalSize(level))
 		}
 
@@ -387,20 +420,31 @@ func (v *version) computeCompaction() {
 			bestScore = score
 		}
 
-		statFiles[level] = len(tables)
+		statFiles[level] = num
 		statSizes[level] = shortenb(int(size))
 		statScore[level] = fmt.Sprintf("%.2f", score)
 		statTotSize += size
 	}
 
-	v.cLevel = bestLevel
-	v.cScore = bestScore
-
 	v.s.logf("version@stat F·%v S·%s%v Sc·%v", statFiles, shortenb(int(statTotSize)), statSizes, statScore)
+
+	if bestScore >= 1 {
+		return bestLevel
+	}
+	return -1
 }
 
-func (v *version) needCompaction() bool {
-	return v.cScore >= 1 || atomic.LoadPointer(&v.cSeek) != nil
+func (v *version) needCompaction(comps *compactionByLevel) (needCompact bool, level int, table *tFile) {
+	if level := v.computeCompaction(comps); level >= 0 {
+		return true, level, nil
+	}
+	if p := atomic.LoadPointer(&v.cSeek); p != nil {
+		ts := (*tSet)(p)
+		if !comps.hasTable(ts.level, ts.table) {
+			return true, ts.level, ts.table
+		}
+	}
+	return false, -1, nil
 }
 
 type tablesScratch struct {
@@ -550,10 +594,6 @@ func (p *versionStaging) finish(trivial bool) *version {
 	for ; n > 0 && nv.levels[n-1] == nil; n-- {
 	}
 	nv.levels = nv.levels[:n]
-
-	// Compute compaction score for new version.
-	nv.computeCompaction()
-
 	return nv
 }
 

@@ -7,8 +7,6 @@
 package leveldb
 
 import (
-	"sync/atomic"
-
 	"github.com/syndtr/goleveldb/leveldb/iterator"
 	"github.com/syndtr/goleveldb/leveldb/memdb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
@@ -51,44 +49,35 @@ func (s *session) flushMemdb(rec *sessionRecord, mdb *memdb.DB, maxLevel int) (i
 	return flushLevel, nil
 }
 
-// Pick a compaction based on current state; need external synchronization.
-func (s *session) pickCompaction() *compaction {
+func (s *session) pickCompactionByLevel(level int) *compaction {
 	v := s.version()
 
-	var sourceLevel int
-	var t0 tFiles
-	var typ int
-	if v.cScore >= 1 {
-		sourceLevel = v.cLevel
-		cptr := s.getCompPtr(sourceLevel)
-		tables := v.levels[sourceLevel]
-		for _, t := range tables {
-			if cptr == nil || s.icmp.Compare(t.imax, cptr) > 0 {
-				t0 = append(t0, t)
-				break
-			}
-		}
-		if len(t0) == 0 {
-			t0 = append(t0, tables[0])
-		}
-		if sourceLevel == 0 {
-			typ = level0Compaction
-		} else {
-			typ = nonLevel0Compaction
-		}
-	} else {
-		if p := atomic.LoadPointer(&v.cSeek); p != nil {
-			ts := (*tSet)(p)
-			sourceLevel = ts.level
-			t0 = append(t0, ts.table)
-			typ = seekCompaction
-		} else {
-			v.release()
-			return nil
+	var (
+		t0  tFiles
+		typ int
+	)
+	cptr := s.getCompPtr(level)
+	tables := v.levels[level]
+	for _, t := range tables {
+		if cptr == nil || s.icmp.Compare(t.imax, cptr) > 0 {
+			t0 = append(t0, t)
+			break
 		}
 	}
+	if len(t0) == 0 {
+		t0 = append(t0, tables[0])
+	}
+	if level == 0 {
+		typ = level0Compaction
+	} else {
+		typ = nonLevel0Compaction
+	}
+	return newCompaction(s, v, level, t0, typ)
+}
 
-	return newCompaction(s, v, sourceLevel, t0, typ)
+func (s *session) pickCompactionByTable(level int, table *tFile) *compaction {
+	v := s.version()
+	return newCompaction(s, v, level, []*tFile{table}, seekCompaction)
 }
 
 // Create compaction from given level and range; need external synchronization.
@@ -323,4 +312,48 @@ func (c *compaction) newIterator() iterator.Iterator {
 	}
 
 	return iterator.NewMergedIterator(its, c.s.icmp, strict)
+}
+
+type compactionByLevel struct {
+	compsByLevel map[int][]*compaction
+}
+
+func (cs *compactionByLevel) add(c *compaction) {
+	cs.compsByLevel[c.sourceLevel] = append(cs.compsByLevel[c.sourceLevel], c)
+}
+
+func (cs *compactionByLevel) delete(c *compaction) {
+	for index, comp := range cs.compsByLevel[c.sourceLevel] {
+		if comp == c {
+			cs.compsByLevel[c.sourceLevel] = append(cs.compsByLevel[c.sourceLevel][:index], cs.compsByLevel[c.sourceLevel][index+1:]...)
+			return
+		}
+	}
+}
+
+func (cs *compactionByLevel) count() int {
+	var total int
+	for _, comps := range cs.compsByLevel {
+		total += len(comps)
+	}
+	return total
+}
+
+func (cs *compactionByLevel) hasTable(level int, table *tFile) bool {
+	comps, exist := cs.compsByLevel[level]
+	if !exist {
+		return false
+	}
+	for _, comp := range comps {
+		for _, t := range append(comp.levels[0], comp.levels[1]...) {
+			if t == table {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (cs *compactionByLevel) get(level int) []*compaction {
+	return cs.compsByLevel[level]
 }

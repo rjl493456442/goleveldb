@@ -568,8 +568,13 @@ func (b *tableCompactionBuilder) revert() error {
 	return nil
 }
 
-func (db *DB) tableCompaction(c *compaction, noTrivial bool) {
+func (db *DB) tableCompaction(c *compaction, noTrivial bool, done func(*compaction)) {
 	defer c.release()
+	defer func() {
+		if done != nil {
+			done(c)
+		}
+	}()
 
 	rec := &sessionRecord{}
 	rec.addCompPtr(c.sourceLevel, c.imax)
@@ -633,7 +638,7 @@ func (db *DB) tableRangeCompaction(level int, umin, umax []byte) error {
 	db.logf("table@compaction range L%d %q:%q", level, umin, umax)
 	if level >= 0 {
 		if c := db.s.getCompactionRange(level, umin, umax, true); c != nil {
-			db.tableCompaction(c, true)
+			db.tableCompaction(c, true, nil)
 		}
 	} else {
 		// Retry until nothing to compact.
@@ -653,7 +658,7 @@ func (db *DB) tableRangeCompaction(level int, umin, umax []byte) error {
 
 			for level := 0; level < m; level++ {
 				if c := db.s.getCompactionRange(level, umin, umax, false); c != nil {
-					db.tableCompaction(c, true)
+					db.tableCompaction(c, true, nil)
 					compacted = true
 				}
 			}
@@ -667,16 +672,14 @@ func (db *DB) tableRangeCompaction(level int, umin, umax []byte) error {
 	return nil
 }
 
-func (db *DB) tableAutoCompaction() {
-	if c := db.s.pickCompaction(); c != nil {
-		db.tableCompaction(c, false)
-	}
-}
-
-func (db *DB) tableNeedCompaction() bool {
+// tableNeedCompaction returns the indicator whether system needs compaction.
+// If so, then the relevant level or target table(is nil if the normal table
+// compaction is required) will be returned.
+func (db *DB) tableNeedCompaction(comps *compactionByLevel) (needCompact bool, level int, table *tFile) {
 	v := db.s.version()
 	defer v.release()
-	return v.needCompaction()
+
+	return v.needCompaction(comps)
 }
 
 // resumeWrite returns an indicator whether we should resume write operation if enough level0 files are compacted.
@@ -836,8 +839,34 @@ func (db *DB) tCompaction() {
 		db.closeW.Done()
 	}()
 
+	var (
+		// The maximum number of compactions are allowed to run concurrently.
+		// -1 means no limitation. The default value is the CPU core number.
+		compLimit int
+
+		// The total number of running compactions
+		compN int
+
+		// Inflight compactions identified by the dest level. All compactions
+		// in the same level are sorted by the key range. Besides the level0
+		// can only have one compaction.
+		comps = &compactionByLevel{compsByLevel: make(map[int][]*compaction)}
+
+		// The channel used to receive the notification that the compaction
+		// has finished.
+		done = make(chan *compaction)
+	)
+
 	for {
-		if db.tableNeedCompaction() {
+		var (
+			needCompact bool
+			level       int
+			table       *tFile
+		)
+		if compLimit == -1 || compN < compLimit {
+			needCompact, level, table = db.tableNeedCompaction(comps)
+		}
+		if needCompact {
 			select {
 			case x = <-db.tcompCmdC:
 			case ch := <-db.tcompPauseC:
@@ -845,6 +874,9 @@ func (db *DB) tCompaction() {
 				continue
 			case <-db.closeC:
 				return
+			case comp := <-done:
+				comps.delete(comp)
+				continue
 			default:
 			}
 			// Resume write operation as soon as possible.
@@ -865,6 +897,9 @@ func (db *DB) tCompaction() {
 			case x = <-db.tcompCmdC:
 			case ch := <-db.tcompPauseC:
 				db.pauseCompaction(ch)
+				continue
+			case comp := <-done:
+				comps.delete(comp)
 				continue
 			case <-db.closeC:
 				return
@@ -888,6 +923,19 @@ func (db *DB) tCompaction() {
 			}
 			x = nil
 		}
-		db.tableAutoCompaction()
+		if level == -1 {
+			continue
+		}
+		var c *compaction
+		if table == nil {
+			c = db.s.pickCompactionByLevel(level)
+		} else {
+			c = db.s.pickCompactionByTable(level, table)
+		}
+		comps.add(c)
+
+		go db.tableCompaction(c, false, func(c *compaction) {
+			done <- c
+		})
 	}
 }
