@@ -353,7 +353,7 @@ func (v *version) pickMemdbLevel(umin, umax []byte, maxLevel int) (level int) {
 //   compaction should be recommended.
 // - If there are some compactions running in with source level N,
 //   then we hold the assumption these compactions will success eventually
-//   and all files involved in level N will be considered **removed**.
+//   and all files involved in level N will be considered **removing**.
 // - If there are some compactions running in with source level N-1,
 //   then we hold the assumption these compactions will success eventually
 //   and all files involved in level N will be considered **unavailable**.
@@ -361,7 +361,7 @@ func (v *version) pickMemdbLevel(umin, umax []byte, maxLevel int) (level int) {
 // After considering all ongoing compactions, if there still exists some
 // tables can be compacted without any overlap with existing compactions,
 // then return the relevant level.
-func (v *version) computeCompaction(comps *compactionByLevel) int {
+func (v *version) computeCompaction(ctx *compactionContext) int {
 	// Precomputed best level for next compaction
 	bestLevel := int(-1)
 	bestScore := float64(-1)
@@ -378,9 +378,9 @@ func (v *version) computeCompaction(comps *compactionByLevel) int {
 			num   = len(tables)
 		)
 		if level == 0 {
-			if cs := comps.get(0); len(cs) > 0 {
+			if cs := ctx.get(0); len(cs) > 0 {
 				// If there is one level0 compaction running, don't pick anymore
-				// level0 compaction again.
+				// level0 compaction.
 				score = float64(-2)
 				num -= cs[0].levels[0].Len()
 				size -= cs[0].levels[0].size()
@@ -399,27 +399,28 @@ func (v *version) computeCompaction(comps *compactionByLevel) int {
 				score = float64(num) / float64(v.s.o.GetCompactionL0Trigger())
 			}
 		} else {
-			// If there are a few compaction involves the tables in this level,
-			// ignore them now. Seems these tables can't be picked for compaction
-			// before these compactions finish.
-			cs := comps.get(level)
+			// If there are ongoing compactions involve the tables in this level,
+			// ignore these tables now. Seems these tables can't be picked for
+			// compaction before these compactions finish.
+			cs := ctx.get(level)
 			for _, comp := range cs {
 				size -= comp.levels[0].size()
 				num -= comp.levels[0].Len()
 			}
-			cs = comps.get(level - 1)
+			cs = ctx.get(level - 1)
 			for _, comp := range cs {
 				size -= comp.levels[1].size()
 				num -= comp.levels[1].Len()
 			}
 			score = float64(size) / float64(v.s.o.GetCompactionTotalSize(level))
 		}
-
+		if _, exist := ctx.denylist[level]; exist {
+			score = float64(-2)
+		}
 		if score > bestScore {
 			bestLevel = level
 			bestScore = score
 		}
-
 		statFiles[level] = num
 		statSizes[level] = shortenb(int(size))
 		statScore[level] = fmt.Sprintf("%.2f", score)
@@ -434,15 +435,22 @@ func (v *version) computeCompaction(comps *compactionByLevel) int {
 	return -1
 }
 
-func (v *version) needCompaction(comps *compactionByLevel) (needCompact bool, level int, table *tFile) {
-	if level := v.computeCompaction(comps); level >= 0 {
+func (v *version) needCompaction(ctx *compactionContext) (needCompact bool, level int, table *tFile) {
+	if level := v.computeCompaction(ctx); level >= 0 {
 		return true, level, nil
 	}
-	if p := atomic.LoadPointer(&v.cSeek); p != nil {
+	if p := atomic.LoadPointer(&v.cSeek); p != nil && !ctx.noseek {
 		ts := (*tSet)(p)
-		if !comps.hasTable(ts.level, ts.table) {
-			return true, ts.level, ts.table
+
+		// Ensure the source table is not picked as the input of level
+		// N compactions or level N-1 compactions.
+		if ctx.removing(ts.level).hasFiles(tFiles{ts.table}) {
+			return false, -1, nil
 		}
+		if ts.level > 0 && ctx.recreating(ts.level).hasFiles(tFiles{ts.table}) {
+			return false, -1, nil
+		}
+		return true, ts.level, ts.table
 	}
 	return false, -1, nil
 }
@@ -561,7 +569,7 @@ func (p *versionStaging) finish(trivial bool) *version {
 					nt = append(nt[:index], append(added, nt[index:]...)...)
 				} else {
 					added.sortByKey(p.base.s.icmp)
-					_, amax := added.getRange(p.base.s.icmp)
+					_, amax := added.getRange(p.base.s.icmp, false)
 					index := nt.searchMin(p.base.s.icmp, amax)
 					nt = append(nt[:index], append(added, nt[index:]...)...)
 				}

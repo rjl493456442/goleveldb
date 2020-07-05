@@ -336,6 +336,22 @@ func (s *session) reuseFileNum(num int64) {
 	}
 }
 
+func (s *session) allocCompNum() int64 {
+	return atomic.AddInt64(&s.stNextCompNum, 1) - 1
+}
+
+func (s *session) reuseCompNum(num int64) {
+	for {
+		old, x := atomic.LoadInt64(&s.stNextCompNum), num
+		if old != x+1 {
+			x = old
+		}
+		if atomic.CompareAndSwapInt64(&s.stNextCompNum, old, x) {
+			break
+		}
+	}
+}
+
 // Set compaction ptr at given level; need external synchronization.
 func (s *session) setCompPtr(level int, ik internalKey) {
 	if level >= len(s.stCompPtrs) {
@@ -481,5 +497,3 @@ func (s *session) flushManifest(rec *sessionRecord) (err error) {
 	s.recordCommited(rec)
 	return
 }
-
-// Compaction related utils

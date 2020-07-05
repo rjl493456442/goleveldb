@@ -7,6 +7,7 @@
 package leveldb
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -675,11 +676,11 @@ func (db *DB) tableRangeCompaction(level int, umin, umax []byte) error {
 // tableNeedCompaction returns the indicator whether system needs compaction.
 // If so, then the relevant level or target table(is nil if the normal table
 // compaction is required) will be returned.
-func (db *DB) tableNeedCompaction(comps *compactionByLevel) (needCompact bool, level int, table *tFile) {
+func (db *DB) tableNeedCompaction(ctx *compactionContext) (needCompact bool, level int, table *tFile) {
 	v := db.s.version()
 	defer v.release()
 
-	return v.needCompaction(comps)
+	return v.needCompaction(ctx)
 }
 
 // resumeWrite returns an indicator whether we should resume write operation if enough level0 files are compacted.
@@ -817,6 +818,152 @@ func (db *DB) mCompaction() {
 	}
 }
 
+type compactions []*compaction
+
+// Returns true if i smallest key is less than j.
+// This used for sort by key in ascending order.
+func (cs compactions) lessByKey(icmp *iComparer, i, j int) bool {
+	a, b := cs[i], cs[j]
+	return icmp.Compare(a.imin, b.imin) < 0
+}
+func (cs compactions) Len() int      { return len(cs) }
+func (cs compactions) Swap(i, j int) { cs[i], cs[j] = cs[j], cs[i] }
+
+// Helper type for sortByKey.
+type compactionsSortByKey struct {
+	compactions
+	icmp *iComparer
+}
+
+func (x *compactionsSortByKey) Less(i, j int) bool {
+	return x.lessByKey(x.icmp, i, j)
+}
+
+type compactionContext struct {
+	byKey    map[int][]*compaction
+	byOrder  map[int][]*compaction
+	icmp     *iComparer
+	noseek   bool
+	denylist map[int]struct{}
+}
+
+func (ctx *compactionContext) add(c *compaction) {
+	ctx.byKey[c.sourceLevel] = append(ctx.byKey[c.sourceLevel], c)
+	sort.Sort(&compactionsSortByKey{
+		compactions: ctx.byKey[c.sourceLevel],
+		icmp:        ctx.icmp,
+	})
+	ctx.byOrder[c.sourceLevel] = append(ctx.byOrder[c.sourceLevel], c)
+}
+
+func (ctx *compactionContext) delete(c *compaction) {
+	for index, comp := range ctx.byKey[c.sourceLevel] {
+		if comp == c {
+			ctx.byKey[c.sourceLevel] = append(ctx.byKey[c.sourceLevel][:index], ctx.byKey[c.sourceLevel][index+1:]...)
+			break
+		}
+	}
+	for index, comp := range ctx.byOrder[c.sourceLevel] {
+		if comp == c {
+			ctx.byOrder[c.sourceLevel] = append(ctx.byOrder[c.sourceLevel][:index], ctx.byOrder[c.sourceLevel][index+1:]...)
+			break
+		}
+	}
+	return
+}
+
+// reset reset the denylist and seek flag. If one level n compaction finishes,
+// then it will re-activate the adjacent levels if they are marked unavailable
+// before. Besides we always re-activate seek compaction.
+func (ctx *compactionContext) reset(level int) {
+	if _, exist := ctx.denylist[level]; exist {
+		delete(ctx.denylist, level)
+	}
+	if _, exist := ctx.denylist[level+1]; exist {
+		delete(ctx.denylist, level+1)
+	}
+	if level > 0 {
+		if _, exist := ctx.denylist[level-1]; exist {
+			delete(ctx.denylist, level-1)
+		}
+	}
+	ctx.noseek = false
+}
+
+func (ctx *compactionContext) count() int {
+	var total int
+	for _, comps := range ctx.byKey {
+		total += len(comps)
+	}
+	return total
+}
+
+func (ctx *compactionContext) get(level int) []*compaction {
+	return ctx.byOrder[level]
+}
+
+func (ctx *compactionContext) getSorted(level int) []*compaction {
+	return ctx.byKey[level]
+}
+
+// removing returns the tables which are acting as the source level input
+// in the ongoing compactions. All returned tables are sorted by keys.
+func (ctx *compactionContext) removing(level int) tFiles {
+	comps := ctx.getSorted(level)
+	var v0 tFiles
+	for _, comp := range comps {
+		v0 = append(v0, comp.levels[0]...)
+	}
+	return v0
+}
+
+// removing returns the tables which are acting as the dest level input
+// in the ongoing compactions. All returned tables are sorted by keys.
+func (ctx *compactionContext) recreating(level int) tFiles {
+	if level == 0 {
+		return nil
+	}
+	comps := ctx.getSorted(level - 1)
+	var v1 tFiles
+	for _, comp := range comps {
+		v1 = append(v1, comp.levels[1]...)
+	}
+	return v1
+}
+
+// tCompaction is the scheduler of table compaction. Here concurrent compactions
+// are allowed and scheduled for best performance. Compaction performance is the
+// bottleneck of the entire system. Slow compaction will eventually lead to write
+// suspension. So this loop will try to maximize the compaction performance by
+// selecting isolated files to compact concurrently.
+//
+// For level0 compaction, concurrency is not allowed. Since we can't guarantee two
+// level0 compactions are not overlapped.
+//
+// For non-level0 compaction, concurrency is allowed if two compactions are totally
+// non-overlapped.
+//
+// For compaction level selection, it's a little different with single-thread version.
+// Now two factors will be considered to select source level: current version and ongoing
+// compactions. For level0 if there is already one compaction running, then no more level0
+// compaction should be picked. For non-level0, if the total size except the "removing"
+// tables and "recreating" tables still exceeds the threshold, it may be picked.
+// The "removing" tables refers to the tables which are picked as the source level input
+// of ongoing compactions. "recreating" tables refers to the tables which are picked
+// as the dest level input of ongoing compactions.
+//
+// For compaction file selection, it's the core of the entire mechanism. For source level
+// we only pick the file which is idle. Idle means it's not the input of other compactions
+// (either level n compactions or level n-1 compactions). It's same while picking files in
+// parent level.
+//
+// But in the parent level, there is one difference. Actually for the file in parent level
+// which is removing(the input of child level compactions), we can just kick them out and mark
+// these compactions as the dependencies. But it will make the code much more complicated.
+// Also consider the concurrency is limited, so we don't accept this kind of compaction.
+//
+// Besides users can specify the concurrency factor, so that the compactions number won't
+// exceed this value. The default concurrency factor is the core of CPU.
 func (db *DB) tCompaction() {
 	var (
 		x     cCmd
@@ -844,14 +991,12 @@ func (db *DB) tCompaction() {
 		// -1 means no limitation. The default value is the CPU core number.
 		compLimit int
 
-		// The total number of running compactions
-		compN int
-
-		// Inflight compactions identified by the dest level. All compactions
-		// in the same level are sorted by the key range. Besides the level0
-		// can only have one compaction.
-		comps = &compactionByLevel{compsByLevel: make(map[int][]*compaction)}
-
+		// Compaction context includes all ongoing compactions.
+		ctx = &compactionContext{
+			byKey:    make(map[int][]*compaction),
+			icmp:     db.s.icmp,
+			denylist: make(map[int]struct{}),
+		}
 		// The channel used to receive the notification that the compaction
 		// has finished.
 		done = make(chan *compaction)
@@ -863,8 +1008,8 @@ func (db *DB) tCompaction() {
 			level       int
 			table       *tFile
 		)
-		if compLimit == -1 || compN < compLimit {
-			needCompact, level, table = db.tableNeedCompaction(comps)
+		if compLimit == -1 || ctx.count() < compLimit {
+			needCompact, level, table = db.tableNeedCompaction(ctx)
 		}
 		if needCompact {
 			select {
@@ -874,8 +1019,9 @@ func (db *DB) tCompaction() {
 				continue
 			case <-db.closeC:
 				return
-			case comp := <-done:
-				comps.delete(comp)
+			case c := <-done:
+				ctx.delete(c)
+				ctx.reset(c.sourceLevel)
 				continue
 			default:
 			}
@@ -898,8 +1044,9 @@ func (db *DB) tCompaction() {
 			case ch := <-db.tcompPauseC:
 				db.pauseCompaction(ch)
 				continue
-			case comp := <-done:
-				comps.delete(comp)
+			case c := <-done:
+				ctx.delete(c)
+				ctx.reset(c.sourceLevel)
 				continue
 			case <-db.closeC:
 				return
@@ -923,17 +1070,28 @@ func (db *DB) tCompaction() {
 			}
 			x = nil
 		}
+		// If it's triggered by external, reloop
 		if level == -1 {
 			continue
 		}
 		var c *compaction
 		if table == nil {
-			c = db.s.pickCompactionByLevel(level)
+			c = db.s.pickCompactionByLevel(level, ctx)
+			if c == nil {
+				// We can't pick one more isolated compaction in level n.
+				// Mark the entire level as unavailable.
+				ctx.denylist[level] = struct{}{}
+				continue
+			}
 		} else {
-			c = db.s.pickCompactionByTable(level, table)
+			c = db.s.pickCompactionByTable(level, table, ctx)
+			if c == nil {
+				// The involved tables are not available now. Mark the seek compaction as unavailable.
+				ctx.noseek = true
+				continue
+			}
 		}
-		comps.add(c)
-
+		ctx.add(c)
 		go db.tableCompaction(c, false, func(c *compaction) {
 			done <- c
 		})

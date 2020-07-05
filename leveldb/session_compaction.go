@@ -49,35 +49,103 @@ func (s *session) flushMemdb(rec *sessionRecord, mdb *memdb.DB, maxLevel int) (i
 	return flushLevel, nil
 }
 
-func (s *session) pickCompactionByLevel(level int) *compaction {
-	v := s.version()
-
+func (s *session) pickFirst(level int, v *version, ctx *compactionContext) *compaction {
 	var (
-		t0  tFiles
-		typ int
+		cptr   = s.getCompPtr(level)
+		tables = v.levels[level]
 	)
-	cptr := s.getCompPtr(level)
-	tables := v.levels[level]
-	for _, t := range tables {
-		if cptr == nil || s.icmp.Compare(t.imax, cptr) > 0 {
-			t0 = append(t0, t)
-			break
-		}
-	}
-	if len(t0) == 0 {
-		t0 = append(t0, tables[0])
-	}
-	if level == 0 {
-		typ = level0Compaction
-	} else {
+	typ := level0Compaction
+	if level != 0 {
 		typ = nonLevel0Compaction
 	}
-	return newCompaction(s, v, level, t0, typ)
+	for _, t := range tables {
+		if cptr == nil || s.icmp.Compare(t.imax, cptr) > 0 {
+			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
+			if c != nil {
+				return c
+			}
+		}
+	}
+	if cptr != nil {
+		for _, t := range tables {
+			if s.icmp.Compare(t.imax, cptr) > 0 {
+				break
+			}
+			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
+			if c != nil {
+				return c
+			}
+		}
+	}
+	return nil
 }
 
-func (s *session) pickCompactionByTable(level int, table *tFile) *compaction {
+func (s *session) pickMore(level int, v *version, ctx *compactionContext) *compaction {
+	var (
+		reverse      bool
+		start, limit internalKey
+	)
+	typ := level0Compaction
+	if level != 0 {
+		typ = nonLevel0Compaction
+	}
+	cs := ctx.get(level)
+
+	limit = cs[len(cs)-1].imax
+	start = cs[0].imax
+	if s.icmp.Compare(start, limit) > 0 {
+		reverse = true
+		start, limit = limit, start
+	}
+
+	tables := v.levels[level]
+	if !reverse {
+		for _, t := range tables {
+			if s.icmp.Compare(t.imax, limit) <= 0 {
+				continue
+			}
+			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
+			if c != nil {
+				return c
+			}
+		}
+		for _, t := range tables {
+			if s.icmp.Compare(t.imax, start) >= 0 {
+				break
+			}
+			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
+			if c != nil {
+				return c
+			}
+		}
+		return nil
+	} else {
+		for _, t := range tables {
+			if s.icmp.Compare(t.imax, start) <= 0 {
+				continue
+			}
+			if s.icmp.Compare(t.imax, limit) >= 0 {
+				break
+			}
+			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
+			if c != nil {
+				return c
+			}
+		}
+		return nil
+	}
+}
+
+func (s *session) pickCompactionByLevel(level int, ctx *compactionContext) *compaction {
 	v := s.version()
-	return newCompaction(s, v, level, []*tFile{table}, seekCompaction)
+	if len(ctx.get(level)) == 0 {
+		return s.pickFirst(level, v, ctx)
+	}
+	return s.pickMore(level, v, ctx)
+}
+
+func (s *session) pickCompactionByTable(level int, table *tFile, ctx *compactionContext) *compaction {
+	return newCompaction(s, s.version(), level, []*tFile{table}, seekCompaction, ctx)
 }
 
 // Create compaction from given level and range; need external synchronization.
@@ -116,10 +184,10 @@ func (s *session) getCompactionRange(sourceLevel int, umin, umax []byte, noLimit
 	if sourceLevel != 0 {
 		typ = nonLevel0Compaction
 	}
-	return newCompaction(s, v, sourceLevel, t0, typ)
+	return newCompaction(s, v, sourceLevel, t0, typ, nil)
 }
 
-func newCompaction(s *session, v *version, sourceLevel int, t0 tFiles, typ int) *compaction {
+func newCompaction(s *session, v *version, sourceLevel int, t0 tFiles, typ int, ctx *compactionContext) *compaction {
 	c := &compaction{
 		s:             s,
 		v:             v,
@@ -129,7 +197,9 @@ func newCompaction(s *session, v *version, sourceLevel int, t0 tFiles, typ int) 
 		maxGPOverlaps: int64(s.o.GetCompactionGPOverlaps(sourceLevel)),
 		tPtrs:         make([]int, len(v.levels)),
 	}
-	c.expand()
+	if !c.expand(ctx) {
+		return nil
+	}
 	c.save()
 	return c
 }
@@ -139,10 +209,12 @@ type compaction struct {
 	s *session
 	v *version
 
+	id            int64
 	typ           int
 	sourceLevel   int
 	levels        [2]tFiles
 	maxGPOverlaps int64
+	dependencies  []*compaction
 
 	gp                tFiles
 	gpi               int
@@ -180,7 +252,7 @@ func (c *compaction) release() {
 }
 
 // Expand compacted tables; need external synchronization.
-func (c *compaction) expand() {
+func (c *compaction) expand(ctx *compactionContext) bool {
 	limit := int64(c.s.o.GetCompactionExpandLimit(c.sourceLevel))
 	vt0 := c.v.levels[c.sourceLevel]
 	vt1 := tFiles{}
@@ -189,26 +261,45 @@ func (c *compaction) expand() {
 	}
 
 	t0, t1 := c.levels[0], c.levels[1]
-	imin, imax := t0.getRange(c.s.icmp)
+	imin, imax := t0.getRange(c.s.icmp, c.sourceLevel == 0)
 
 	// For non-zero levels, the ukey can't hop across tables at all.
 	if c.sourceLevel == 0 {
 		// We expand t0 here just incase ukey hop across tables.
-		t0 = vt0.getOverlaps(t0, c.s.icmp, imin.ukey(), imax.ukey(), c.sourceLevel == 0)
+		t0 = vt0.getOverlaps(t0, c.s.icmp, imin.ukey(), imax.ukey(), true)
 		if len(t0) != len(c.levels[0]) {
-			imin, imax = t0.getRange(c.s.icmp)
+			imin, imax = t0.getRange(c.s.icmp, true)
+		}
+	}
+	if c.sourceLevel != 0 {
+		// Ensure the source level files are not the input of other compactions.
+		if ctx.removing(c.sourceLevel).hasFiles(t0) {
+			return false
+		}
+		if ctx.recreating(c.sourceLevel).hasFiles(t0) {
+			return false
 		}
 	}
 	t1 = vt1.getOverlaps(t1, c.s.icmp, imin.ukey(), imax.ukey(), false)
+
+	// If the overlapped tables in level n+1 are not available, abort the expansion
+	if ctx.recreating(c.sourceLevel + 1).hasFiles(t1) {
+		return false
+	}
+	if ctx.removing(c.sourceLevel + 1).hasFiles(t1) {
+		return false
+	}
 	// Get entire range covered by compaction.
-	amin, amax := append(t0, t1...).getRange(c.s.icmp)
+	amin, amax := append(t0, t1...).getRange(c.s.icmp, c.sourceLevel == 0)
 
 	// See if we can grow the number of inputs in "sourceLevel" without
 	// changing the number of "sourceLevel+1" files we pick up.
 	if len(t1) > 0 {
 		exp0 := vt0.getOverlaps(nil, c.s.icmp, amin.ukey(), amax.ukey(), c.sourceLevel == 0)
-		if len(exp0) > len(t0) && t1.size()+exp0.size() < limit {
-			xmin, xmax := exp0.getRange(c.s.icmp)
+
+		skip := ctx.removing(c.sourceLevel).hasFiles(exp0) || ctx.recreating(c.sourceLevel).hasFiles(exp0)
+		if len(exp0) > len(t0) && t1.size()+exp0.size() < limit && !skip {
+			xmin, xmax := exp0.getRange(c.s.icmp, c.sourceLevel == 0)
 			exp1 := vt1.getOverlaps(nil, c.s.icmp, xmin.ukey(), xmax.ukey(), false)
 			if len(exp1) == len(t1) {
 				c.s.logf("table@compaction expanding L%d+L%d (F·%d S·%s)+(F·%d S·%s) -> (F·%d S·%s)+(F·%d S·%s)",
@@ -216,7 +307,7 @@ func (c *compaction) expand() {
 					len(exp0), shortenb(int(exp0.size())), len(exp1), shortenb(int(exp1.size())))
 				imin, imax = xmin, xmax
 				t0, t1 = exp0, exp1
-				amin, amax = append(t0, t1...).getRange(c.s.icmp)
+				amin, amax = append(t0, t1...).getRange(c.s.icmp, c.sourceLevel == 0)
 			}
 		}
 	}
@@ -229,6 +320,8 @@ func (c *compaction) expand() {
 
 	c.levels[0], c.levels[1] = t0, t1
 	c.imin, c.imax = imin, imax
+
+	return true
 }
 
 // Check whether compaction is trivial.
@@ -312,48 +405,4 @@ func (c *compaction) newIterator() iterator.Iterator {
 	}
 
 	return iterator.NewMergedIterator(its, c.s.icmp, strict)
-}
-
-type compactionByLevel struct {
-	compsByLevel map[int][]*compaction
-}
-
-func (cs *compactionByLevel) add(c *compaction) {
-	cs.compsByLevel[c.sourceLevel] = append(cs.compsByLevel[c.sourceLevel], c)
-}
-
-func (cs *compactionByLevel) delete(c *compaction) {
-	for index, comp := range cs.compsByLevel[c.sourceLevel] {
-		if comp == c {
-			cs.compsByLevel[c.sourceLevel] = append(cs.compsByLevel[c.sourceLevel][:index], cs.compsByLevel[c.sourceLevel][index+1:]...)
-			return
-		}
-	}
-}
-
-func (cs *compactionByLevel) count() int {
-	var total int
-	for _, comps := range cs.compsByLevel {
-		total += len(comps)
-	}
-	return total
-}
-
-func (cs *compactionByLevel) hasTable(level int, table *tFile) bool {
-	comps, exist := cs.compsByLevel[level]
-	if !exist {
-		return false
-	}
-	for _, comp := range comps {
-		for _, t := range append(comp.levels[0], comp.levels[1]...) {
-			if t == table {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (cs *compactionByLevel) get(level int) []*compaction {
-	return cs.compsByLevel[level]
 }
