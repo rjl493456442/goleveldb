@@ -214,7 +214,6 @@ type compaction struct {
 	sourceLevel   int
 	levels        [2]tFiles
 	maxGPOverlaps int64
-	dependencies  []*compaction
 
 	gp                tFiles
 	gpi               int
@@ -296,7 +295,6 @@ func (c *compaction) expand(ctx *compactionContext) bool {
 	// changing the number of "sourceLevel+1" files we pick up.
 	if len(t1) > 0 {
 		exp0 := vt0.getOverlaps(nil, c.s.icmp, amin.ukey(), amax.ukey(), c.sourceLevel == 0)
-
 		skip := ctx.removing(c.sourceLevel).hasFiles(exp0) || ctx.recreating(c.sourceLevel).hasFiles(exp0)
 		if len(exp0) > len(t0) && t1.size()+exp0.size() < limit && !skip {
 			xmin, xmax := exp0.getRange(c.s.icmp, c.sourceLevel == 0)

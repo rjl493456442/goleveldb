@@ -314,9 +314,6 @@ func (db *DB) memCompaction() {
 	resumeC := make(chan struct{})
 	select {
 	case db.tcompPauseSetC <- (<-chan struct{})(resumeC):
-	case <-db.compPerErrC:
-		close(resumeC)
-		resumeC = nil
 	case <-db.closeC:
 		db.compactionExitTransact()
 	}
@@ -364,15 +361,13 @@ func (db *DB) memCompaction() {
 	db.dropFrozenMem()
 
 	// Resume table compaction.
-	if resumeC != nil {
-		select {
-		case db.tcompPauseSetC <- nil:
-		case <-db.closeC:
-			db.compactionExitTransact()
-		}
-		close(resumeC)
-		resumeC = nil
+	select {
+	case db.tcompPauseSetC <- nil:
+	case <-db.closeC:
+		db.compactionExitTransact()
 	}
+	close(resumeC)
+	resumeC = nil
 
 	// Trigger table compaction.
 	db.compTrigger(db.tcompCmdC)
@@ -840,32 +835,32 @@ func (x *compactionsSortByKey) Less(i, j int) bool {
 }
 
 type compactionContext struct {
-	byKey    map[int][]*compaction
-	byOrder  map[int][]*compaction
+	sorted   map[int][]*compaction
+	fifo     map[int][]*compaction
 	icmp     *iComparer
 	noseek   bool
 	denylist map[int]struct{}
 }
 
 func (ctx *compactionContext) add(c *compaction) {
-	ctx.byKey[c.sourceLevel] = append(ctx.byKey[c.sourceLevel], c)
+	ctx.sorted[c.sourceLevel] = append(ctx.sorted[c.sourceLevel], c)
 	sort.Sort(&compactionsSortByKey{
-		compactions: ctx.byKey[c.sourceLevel],
+		compactions: ctx.sorted[c.sourceLevel],
 		icmp:        ctx.icmp,
 	})
-	ctx.byOrder[c.sourceLevel] = append(ctx.byOrder[c.sourceLevel], c)
+	ctx.fifo[c.sourceLevel] = append(ctx.fifo[c.sourceLevel], c)
 }
 
 func (ctx *compactionContext) delete(c *compaction) {
-	for index, comp := range ctx.byKey[c.sourceLevel] {
+	for index, comp := range ctx.sorted[c.sourceLevel] {
 		if comp == c {
-			ctx.byKey[c.sourceLevel] = append(ctx.byKey[c.sourceLevel][:index], ctx.byKey[c.sourceLevel][index+1:]...)
+			ctx.sorted[c.sourceLevel] = append(ctx.sorted[c.sourceLevel][:index], ctx.sorted[c.sourceLevel][index+1:]...)
 			break
 		}
 	}
-	for index, comp := range ctx.byOrder[c.sourceLevel] {
+	for index, comp := range ctx.fifo[c.sourceLevel] {
 		if comp == c {
-			ctx.byOrder[c.sourceLevel] = append(ctx.byOrder[c.sourceLevel][:index], ctx.byOrder[c.sourceLevel][index+1:]...)
+			ctx.fifo[c.sourceLevel] = append(ctx.fifo[c.sourceLevel][:index], ctx.fifo[c.sourceLevel][index+1:]...)
 			break
 		}
 	}
@@ -892,18 +887,18 @@ func (ctx *compactionContext) reset(level int) {
 
 func (ctx *compactionContext) count() int {
 	var total int
-	for _, comps := range ctx.byKey {
+	for _, comps := range ctx.sorted {
 		total += len(comps)
 	}
 	return total
 }
 
 func (ctx *compactionContext) get(level int) []*compaction {
-	return ctx.byOrder[level]
+	return ctx.fifo[level]
 }
 
 func (ctx *compactionContext) getSorted(level int) []*compaction {
-	return ctx.byKey[level]
+	return ctx.sorted[level]
 }
 
 // removing returns the tables which are acting as the source level input
@@ -941,7 +936,7 @@ func (ctx *compactionContext) recreating(level int) tFiles {
 // level0 compactions are not overlapped.
 //
 // For non-level0 compaction, concurrency is allowed if two compactions are totally
-// non-overlapped.
+// isolated.
 //
 // For compaction level selection, it's a little different with single-thread version.
 // Now two factors will be considered to select source level: current version and ongoing
@@ -954,13 +949,13 @@ func (ctx *compactionContext) recreating(level int) tFiles {
 //
 // For compaction file selection, it's the core of the entire mechanism. For source level
 // we only pick the file which is idle. Idle means it's not the input of other compactions
-// (either level n compactions or level n-1 compactions). It's same while picking files in
-// parent level.
+// (either level n compactions or level n-1 compactions). It's same when picking files in
+// parent level. In this way we can sure all compacting files are isolated with each other.
 //
 // But in the parent level, there is one difference. Actually for the file in parent level
 // which is removing(the input of child level compactions), we can just kick them out and mark
 // these compactions as the dependencies. But it will make the code much more complicated.
-// Also consider the concurrency is limited, so we don't accept this kind of compaction.
+// Also consider the concurrency is limited, so we just don't accept this kind of compaction.
 //
 // Besides users can specify the concurrency factor, so that the compactions number won't
 // exceed this value. The default concurrency factor is the core of CPU.
@@ -993,13 +988,18 @@ func (db *DB) tCompaction() {
 
 		// Compaction context includes all ongoing compactions.
 		ctx = &compactionContext{
-			byKey:    make(map[int][]*compaction),
+			sorted:   make(map[int][]*compaction),
+			fifo:     make(map[int][]*compaction),
 			icmp:     db.s.icmp,
 			denylist: make(map[int]struct{}),
 		}
 		// The channel used to receive the notification that the compaction
 		// has finished.
 		done = make(chan *compaction)
+
+		// Range compaction related fields, nil means one range compaction
+		// is waiting.
+		rangeCmd cCmd
 	)
 
 	for {
@@ -1008,7 +1008,7 @@ func (db *DB) tCompaction() {
 			level       int
 			table       *tFile
 		)
-		if compLimit == -1 || ctx.count() < compLimit {
+		if (compLimit == -1 || ctx.count() < compLimit) && rangeCmd == nil {
 			needCompact, level, table = db.tableNeedCompaction(ctx)
 		}
 		if needCompact {
@@ -1039,6 +1039,14 @@ func (db *DB) tCompaction() {
 				waitQ[i] = nil
 			}
 			waitQ = waitQ[:0]
+
+			// If there is a pending compaction
+			if rangeCmd != nil && ctx.count() == 0 {
+				cmd := rangeCmd.(cRange)
+				cmd.ack(db.tableRangeCompaction(cmd.level, cmd.min, cmd.max))
+				rangeCmd = nil
+				continue
+			}
 			select {
 			case x = <-db.tcompCmdC:
 			case ch := <-db.tcompPauseC:
@@ -1064,6 +1072,10 @@ func (db *DB) tCompaction() {
 					}
 				}
 			case cRange:
+				if ctx.count() > 0 {
+					rangeCmd = x
+					continue
+				}
 				x.ack(db.tableRangeCompaction(cmd.level, cmd.min, cmd.max))
 			default:
 				panic("leveldb: unknown command")
@@ -1092,8 +1104,6 @@ func (db *DB) tCompaction() {
 			}
 		}
 		ctx.add(c)
-		go db.tableCompaction(c, false, func(c *compaction) {
-			done <- c
-		})
+		go db.tableCompaction(c, false, func(c *compaction) { done <- c })
 	}
 }
