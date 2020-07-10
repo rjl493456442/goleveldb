@@ -49,6 +49,10 @@ func (s *session) flushMemdb(rec *sessionRecord, mdb *memdb.DB, maxLevel int) (i
 	return flushLevel, nil
 }
 
+// pickFirst picks the seed file for compaction if there is no ongoing compaction
+// in this level. The pick algorithm is very simple: select the first file with the
+// max key greater than compPtr as the seed file. If the compPtr is nil, than pick
+// the first one.
 func (s *session) pickFirst(level int, v *version, ctx *compactionContext) *compaction {
 	var (
 		cptr   = s.getCompPtr(level)
@@ -80,6 +84,8 @@ func (s *session) pickFirst(level int, v *version, ctx *compactionContext) *comp
 	return nil
 }
 
+// pickMore picks the seed file for compaction if there are ongoing compactions
+// in this level.
 func (s *session) pickMore(level int, v *version, ctx *compactionContext) *compaction {
 	var (
 		reverse      bool
@@ -90,6 +96,9 @@ func (s *session) pickMore(level int, v *version, ctx *compactionContext) *compa
 		typ = nonLevel0Compaction
 	}
 	cs := ctx.get(level)
+	if len(cs) == 0 {
+		return nil // Should never happen
+	}
 
 	limit = cs[len(cs)-1].imax
 	start = cs[0].imax

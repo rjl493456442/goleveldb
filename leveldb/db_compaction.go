@@ -983,8 +983,8 @@ func (db *DB) tCompaction() {
 
 	var (
 		// The maximum number of compactions are allowed to run concurrently.
-		// -1 means no limitation. The default value is the CPU core number.
-		compLimit int
+		// The default value is the CPU core number.
+		compLimit = db.s.o.GetCompactionConcurrency()
 
 		// Compaction context includes all ongoing compactions.
 		ctx = &compactionContext{
@@ -1008,7 +1008,7 @@ func (db *DB) tCompaction() {
 			level       int
 			table       *tFile
 		)
-		if (compLimit == -1 || ctx.count() < compLimit) && rangeCmd == nil {
+		if ctx.count() < compLimit && rangeCmd == nil {
 			needCompact, level, table = db.tableNeedCompaction(ctx)
 		}
 		if needCompact {
