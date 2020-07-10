@@ -1040,12 +1040,12 @@ func (db *DB) tCompaction() {
 			}
 			waitQ = waitQ[:0]
 
-			// If there is a pending compaction
+			// If there is a pending range compaction, do it right now
 			if rangeCmd != nil && ctx.count() == 0 {
 				cmd := rangeCmd.(cRange)
 				cmd.ack(db.tableRangeCompaction(cmd.level, cmd.min, cmd.max))
 				rangeCmd = nil
-				continue
+				continue // Re-loop is necessary, try to spin up more compactions
 			}
 			select {
 			case x = <-db.tcompCmdC:

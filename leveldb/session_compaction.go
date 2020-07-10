@@ -62,6 +62,18 @@ func (s *session) pickFirst(level int, v *version, ctx *compactionContext) *comp
 	if level != 0 {
 		typ = nonLevel0Compaction
 	}
+	// Level0 files are overlapped, pick seed file from the beginning.
+	if level == 0 {
+		for _, t := range tables {
+			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
+			if c != nil {
+				return c
+			}
+		}
+		return nil
+	}
+	// Non-level0 files are not overlapped, pick seed file with
+	// round-of-robin algorithm.
 	for _, t := range tables {
 		if cptr == nil || s.icmp.Compare(t.imax, cptr) > 0 {
 			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
