@@ -401,15 +401,15 @@ func (b *tableCompactionBuilder) appendKV(key, value []byte) error {
 	// Create new table if not already.
 	if b.tw == nil {
 		// Check for pause event.
-		if b.db != nil {
-			select {
-			case ch := <-b.db.tcompPauseC:
-				b.db.pauseCompaction(ch)
-			case <-b.db.closeC:
-				b.db.compactionExitTransact()
-			default:
-			}
-		}
+		//if b.db != nil {
+		//	select {
+		//	case ch := <-b.db.tcompPauseC:
+		//		b.db.pauseCompaction(ch)
+		//	case <-b.db.closeC:
+		//		b.db.compactionExitTransact()
+		//	default:
+		//	}
+		//}
 
 		// Create new table.
 		var err error
