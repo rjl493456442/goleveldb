@@ -7,6 +7,7 @@
 package leveldb
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -1014,9 +1015,9 @@ func (db *DB) tCompaction() {
 		if needCompact {
 			select {
 			case x = <-db.tcompCmdC:
-			case ch := <-db.tcompPauseC:
-				db.pauseCompaction(ch)
-				continue
+			//case ch := <-db.tcompPauseC:
+			//	db.pauseCompaction(ch)
+			//	continue
 			case <-db.closeC:
 				return
 			case c := <-done:
@@ -1049,9 +1050,9 @@ func (db *DB) tCompaction() {
 			}
 			select {
 			case x = <-db.tcompCmdC:
-			case ch := <-db.tcompPauseC:
-				db.pauseCompaction(ch)
-				continue
+			//case ch := <-db.tcompPauseC:
+			//	db.pauseCompaction(ch)
+			//	continue
 			case c := <-done:
 				ctx.delete(c)
 				ctx.reset(c.sourceLevel)
@@ -1104,6 +1105,10 @@ func (db *DB) tCompaction() {
 			}
 		}
 		ctx.add(c)
-		go db.tableCompaction(c, false, func(c *compaction) { done <- c })
+		fmt.Println("Running compaction", "level", c.sourceLevel, "input", len(c.levels[0]), "parent", len(c.levels[1]), "thread", ctx.count())
+		go db.tableCompaction(c, false, func(c *compaction) {
+			done <- c
+			fmt.Println("Compaction done", "level", c.sourceLevel, "input", len(c.levels[0]), "parent", len(c.levels[1]))
+		})
 	}
 }
