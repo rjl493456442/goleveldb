@@ -812,9 +812,9 @@ func (db *DB) tCompaction() {
 		if db.tableNeedCompaction() {
 			select {
 			case x = <-db.tcompCmdC:
-			case ch := <-db.tcompPauseC:
-				db.pauseCompaction(ch)
-				continue
+			//case ch := <-db.tcompPauseC:
+			//	db.pauseCompaction(ch)
+			//	continue
 			case <-db.closeC:
 				return
 			default:
@@ -835,9 +835,9 @@ func (db *DB) tCompaction() {
 			waitQ = waitQ[:0]
 			select {
 			case x = <-db.tcompCmdC:
-			case ch := <-db.tcompPauseC:
-				db.pauseCompaction(ch)
-				continue
+			//case ch := <-db.tcompPauseC:
+			//	db.pauseCompaction(ch)
+			//	continue
 			case <-db.closeC:
 				return
 			}
