@@ -157,8 +157,13 @@ func (s *session) pickMore(level int, v *version, ctx *compactionContext) *compa
 	}
 }
 
-func (s *session) pickCompactionByLevel(level int, ctx *compactionContext) *compaction {
+func (s *session) pickCompactionByLevel(level int, ctx *compactionContext) (comp *compaction) {
 	v := s.version()
+	defer func() {
+		if comp == nil {
+			v.release()
+		}
+	}()
 	if len(ctx.get(level)) == 0 {
 		return s.pickFirst(level, v, ctx)
 	}

@@ -41,7 +41,6 @@ type session struct {
 	stPrevJournalNum int64 // prev journal file number; no longer used; for compatibility with older version of leveldb
 	stTempFileNum    int64
 	stSeqNum         uint64 // last mem compacted seq; need external synchronization
-	stNextCompNum    int64  // current unused compaction number
 
 	stor     *iStorage
 	storLock storage.Locker
