@@ -951,7 +951,7 @@ func (ctx *compactionContext) recreating(level int) tFiles {
 // For compaction file selection, it's the core of the entire mechanism. For source level
 // we only pick the file which is idle. Idle means it's not the input of other compactions
 // (either level n compactions or level n-1 compactions). It's same when picking files in
-// parent level. In this way we can sure all compacting files are isolated with each other.
+// parent level. In this way we can ensure all compacting files are isolated with each other.
 //
 // But in the parent level, there is one difference. Actually for the file in parent level
 // which is removing(the input of child level compactions), we can just kick them out and mark
@@ -961,27 +961,6 @@ func (ctx *compactionContext) recreating(level int) tFiles {
 // Besides users can specify the concurrency factor, so that the compactions number won't
 // exceed this value. The default concurrency factor is the core of CPU.
 func (db *DB) tCompaction() {
-	var (
-		x     cCmd
-		waitQ []cCmd
-	)
-
-	defer func() {
-		if x := recover(); x != nil {
-			if x != errCompactionTransactExiting {
-				panic(x)
-			}
-		}
-		for i := range waitQ {
-			waitQ[i].ack(ErrClosed)
-			waitQ[i] = nil
-		}
-		if x != nil {
-			x.ack(ErrClosed)
-		}
-		db.closeW.Done()
-	}()
-
 	var (
 		// The maximum number of compactions are allowed to run concurrently.
 		// The default value is the CPU core number.
@@ -994,14 +973,32 @@ func (db *DB) tCompaction() {
 			icmp:     db.s.icmp,
 			denylist: make(map[int]struct{}),
 		}
-		// The channel used to receive the notification that the compaction
-		// has finished.
-		done = make(chan *compaction)
-
-		// Range compaction related fields, nil means one range compaction
-		// is waiting.
+		done     = make(chan *compaction)
+		x        cCmd
+		waitQ    []cCmd
 		rangeCmd cCmd
+		subWg    sync.WaitGroup
 	)
+	defer func() {
+		// Panic catcher for potential range compaction
+		if x := recover(); x != nil {
+			if x != errCompactionTransactExiting {
+				panic(x)
+			}
+		}
+		subWg.Wait()
+		for i := range waitQ {
+			waitQ[i].ack(ErrClosed)
+			waitQ[i] = nil
+		}
+		if x != nil {
+			x.ack(ErrClosed)
+		}
+		if rangeCmd != nil {
+			rangeCmd.ack(ErrClosed)
+		}
+		db.closeW.Done()
+	}()
 
 	for {
 		var (
@@ -1014,12 +1011,12 @@ func (db *DB) tCompaction() {
 		}
 		if needCompact {
 			select {
+			case <-db.closeC:
+				return
 			case x = <-db.tcompCmdC:
 			//case ch := <-db.tcompPauseC:
 			//	db.pauseCompaction(ch)
 			//	continue
-			case <-db.closeC:
-				return
 			case c := <-done:
 				ctx.delete(c)
 				ctx.reset(c.sourceLevel)
@@ -1049,6 +1046,8 @@ func (db *DB) tCompaction() {
 				continue // Re-loop is necessary, try to spin up more compactions
 			}
 			select {
+			case <-db.closeC:
+				return
 			case x = <-db.tcompCmdC:
 			//case ch := <-db.tcompPauseC:
 			//	db.pauseCompaction(ch)
@@ -1057,8 +1056,6 @@ func (db *DB) tCompaction() {
 				ctx.delete(c)
 				ctx.reset(c.sourceLevel)
 				continue
-			case <-db.closeC:
-				return
 			}
 		}
 		if x != nil {
@@ -1106,9 +1103,24 @@ func (db *DB) tCompaction() {
 		}
 		ctx.add(c)
 		fmt.Println("Running compaction", "level", c.sourceLevel, "input", len(c.levels[0]), "parent", len(c.levels[1]), "thread", ctx.count())
-		go db.tableCompaction(c, false, func(c *compaction) {
-			done <- c
-			fmt.Println("Compaction done", "level", c.sourceLevel, "input", len(c.levels[0]), "parent", len(c.levels[1]))
-		})
+		subWg.Add(1)
+		go func() {
+			defer func() {
+				if x := recover(); x != nil {
+					if x != errCompactionTransactExiting {
+						panic(x)
+					}
+				}
+			}()
+			defer subWg.Done()
+
+			db.tableCompaction(c, false, func(c *compaction) {
+				select {
+				case done <-c:
+				case <-db.closeC:
+				}
+				fmt.Println("Compaction done", "level", c.sourceLevel, "input", len(c.levels[0]), "parent", len(c.levels[1]))
+			})
+		}()
 	}
 }
