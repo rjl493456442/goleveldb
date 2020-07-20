@@ -7,6 +7,8 @@
 package leveldb
 
 import (
+	"sort"
+
 	"github.com/syndtr/goleveldb/leveldb/iterator"
 	"github.com/syndtr/goleveldb/leveldb/memdb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
@@ -62,8 +64,9 @@ func (s *session) pickFirst(level int, v *version, ctx *compactionContext) *comp
 	if level != 0 {
 		typ = nonLevel0Compaction
 	}
-	// Level0 files are overlapped, pick seed file from the beginning.
-	if level == 0 {
+	// If it's level0 compaction(file overlapped) or the cptr is nil,
+	// iterate from the beginning.
+	if level == 0 || cptr == nil {
 		for _, t := range tables {
 			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
 			if c != nil {
@@ -72,25 +75,20 @@ func (s *session) pickFirst(level int, v *version, ctx *compactionContext) *comp
 		}
 		return nil
 	}
-	// Non-level0 files are not overlapped, pick seed file with
-	// round-of-robin algorithm.
-	for _, t := range tables {
-		if cptr == nil || s.icmp.Compare(t.imax, cptr) > 0 {
-			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
-			if c != nil {
-				return c
-			}
+	// Binary search the proper start position
+	start := sort.Search(len(tables), func(i int) bool {
+		return s.icmp.Compare(tables[i].imax, cptr) > 0
+	})
+	for i := start; start < len(tables); i++ {
+		c := newCompaction(s, v, level, tFiles{tables[i]}, typ, ctx)
+		if c != nil {
+			return c
 		}
 	}
-	if cptr != nil {
-		for _, t := range tables {
-			if s.icmp.Compare(t.imax, cptr) > 0 {
-				break
-			}
-			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
-			if c != nil {
-				return c
-			}
+	for i := 0; i < start; i++ {
+		c := newCompaction(s, v, level, tFiles{tables[i]}, typ, ctx)
+		if c != nil {
+			return c
 		}
 	}
 	return nil
@@ -121,11 +119,11 @@ func (s *session) pickMore(level int, v *version, ctx *compactionContext) *compa
 
 	tables := v.levels[level]
 	if !reverse {
-		for _, t := range tables {
-			if s.icmp.Compare(t.imax, limit) <= 0 {
-				continue
-			}
-			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
+		p := sort.Search(len(tables), func(i int) bool {
+			return s.icmp.Compare(tables[i].imax, start) > 0
+		})
+		for i := p; i < len(tables); i++ {
+			c := newCompaction(s, v, level, tFiles{tables[i]}, typ, ctx)
 			if c != nil {
 				return c
 			}
@@ -141,14 +139,14 @@ func (s *session) pickMore(level int, v *version, ctx *compactionContext) *compa
 		}
 		return nil
 	} else {
-		for _, t := range tables {
-			if s.icmp.Compare(t.imax, start) <= 0 {
-				continue
-			}
-			if s.icmp.Compare(t.imax, limit) >= 0 {
+		p := sort.Search(len(tables), func(i int) bool {
+			return s.icmp.Compare(tables[i].imax, start) > 0
+		})
+		for i := p; i < len(tables); i++ {
+			if s.icmp.Compare(tables[i].imax, limit) >= 0 {
 				break
 			}
-			c := newCompaction(s, v, level, tFiles{t}, typ, ctx)
+			c := newCompaction(s, v, level, tFiles{tables[i]}, typ, ctx)
 			if c != nil {
 				return c
 			}
