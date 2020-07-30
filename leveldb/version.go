@@ -427,7 +427,7 @@ func (v *version) computeCompaction(ctx *compactionContext) int {
 		statTotSize += size
 	}
 
-	v.s.logf("version@stat F·%v S·%s%v Sc·%v", statFiles, shortenb(int(statTotSize)), statSizes, statScore)
+	// v.s.logf("version@stat F·%v S·%s%v Sc·%v", statFiles, shortenb(int(statTotSize)), statSizes, statScore)
 
 	if bestScore >= 1 {
 		return bestLevel

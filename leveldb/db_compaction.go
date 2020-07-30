@@ -169,11 +169,16 @@ func (db *DB) compactionTransact(name string, t compactionTransactInterface) {
 	)
 	var (
 		backoff  = backoffMin
-		backoffT = time.NewTimer(backoff)
+		backoffT *time.Timer
 		lastCnt  = compactionTransactCounter(0)
 
 		disableBackoff = db.s.o.GetDisableCompactionBackoff()
 	)
+	defer func() {
+		if backoffT != nil {
+			backoffT.Stop()
+		}
+	}()
 	for n := 0; ; n++ {
 		// Check whether the DB is closed.
 		if db.isClosed() {
@@ -218,7 +223,11 @@ func (db *DB) compactionTransact(name string, t compactionTransactInterface) {
 			}
 
 			// Backoff.
-			backoffT.Reset(backoff)
+			if backoffT == nil {
+				backoffT = time.NewTimer(backoff)
+			} else {
+				backoffT.Reset(backoff)
+			}
 			if backoff < backoffMax {
 				backoff *= backoffMul
 				if backoff > backoffMax {
@@ -869,7 +878,7 @@ func (ctx *compactionContext) delete(c *compaction) {
 	return
 }
 
-// reset reset the denylist and seek flag. If one level n compaction finishes,
+// reset resets the denylist and seek flag. If one level-n compaction finishes,
 // then it will re-activate the adjacent levels if they are marked unavailable
 // before. Besides we always re-activate seek compaction.
 func (ctx *compactionContext) reset(level int) {
@@ -935,9 +944,9 @@ func (ctx *compactionContext) recreating(level int) tFiles {
 // selecting isolated files to compact concurrently.
 //
 // For level0 compaction, concurrency is not allowed. Since we can't guarantee two
-// level0 compactions are not overlapped. But we do see that level0 compaction in
+// level0 compactions are non-overlapped. But we do see that level0 compaction in
 // some sense become the bottleneck, it can slow down/suspend write operations if
-// it's not fast enough. Also if level0 compaction can't generate sstables fast
+// it's not fast enough. Also if level0 compaction can't generate tables fast
 // enough, the non-level0 compactors may become idle.
 //
 // For non-level0 compaction, concurrency is allowed if two compactions are totally
@@ -961,9 +970,6 @@ func (ctx *compactionContext) recreating(level int) tFiles {
 // which is removing(the input of child level compactions), we can just kick them out and mark
 // these compactions as the dependencies. But it will make the code much more complicated.
 // Also consider the concurrency is limited, so we just don't accept this kind of compaction.
-//
-// Besides users can specify the concurrency factor, so that the compactions number won't
-// exceed this value. The default concurrency factor is the core of CPU.
 func (db *DB) tCompaction() {
 	var (
 		// The maximum number of compactions are allowed to run concurrently.
