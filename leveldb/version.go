@@ -401,15 +401,9 @@ func (v *version) computeCompaction(ctx *compactionContext) int {
 			for _, comp := range cs {
 				size -= comp.levels[0].size()
 			}
-			// If there are some level-1 compactions, assume these compaction will
-			// succeed eventually and all data will be flushed into this level.
-			// It's helpful for level1 especially. Usually level0 is a "BIG" compaction
-			// and may run for a longtime. In this case, we can schedule level1 compaction
-			// earlier instead of just waiting. If the previous compaction is failed,
-			// it doesn't really matter.
 			cs = ctx.get(level - 1)
 			for _, comp := range cs {
-				size += comp.levels[0].size()
+				size -= comp.levels[1].size()
 			}
 			score = float64(size) / float64(v.s.o.GetCompactionTotalSize(level))
 		}

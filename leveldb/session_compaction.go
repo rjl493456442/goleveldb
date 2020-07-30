@@ -79,7 +79,7 @@ func (s *session) pickFirst(level int, v *version, ctx *compactionContext) *comp
 	start := sort.Search(len(tables), func(i int) bool {
 		return s.icmp.Compare(tables[i].imax, cptr) > 0
 	})
-	for i := start; start < len(tables); i++ {
+	for i := start; i < len(tables); i++ {
 		c := newCompaction(s, v, level, tFiles{tables[i]}, typ, ctx)
 		if c != nil {
 			return c
