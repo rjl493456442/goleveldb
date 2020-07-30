@@ -7,7 +7,6 @@
 package leveldb
 
 import (
-	"fmt"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -26,8 +25,9 @@ type version struct {
 	id int64 // unique monotonous increasing version id
 	s  *session
 
-	levels []tFiles
-	cSeek  unsafe.Pointer
+	levels    []tFiles
+	levelsize []int64
+	cSeek     unsafe.Pointer
 
 	closing  bool
 	ref      int
@@ -366,15 +366,15 @@ func (v *version) computeCompaction(ctx *compactionContext) int {
 	bestLevel := int(-1)
 	bestScore := float64(-1)
 
-	statFiles := make([]int, len(v.levels))
-	statSizes := make([]string, len(v.levels))
-	statScore := make([]string, len(v.levels))
-	statTotSize := int64(0)
+	//statFiles := make([]int, len(v.levels))
+	//statSizes := make([]string, len(v.levels))
+	//statScore := make([]string, len(v.levels))
+	//statTotSize := int64(0)
 
 	for level, tables := range v.levels {
 		var (
 			score float64
-			size  = tables.size()
+			size  = v.levelsize[level]
 			num   = len(tables)
 		)
 		if level == 0 {
@@ -421,10 +421,10 @@ func (v *version) computeCompaction(ctx *compactionContext) int {
 			bestLevel = level
 			bestScore = score
 		}
-		statFiles[level] = num
-		statSizes[level] = shortenb(int(size))
-		statScore[level] = fmt.Sprintf("%.2f", score)
-		statTotSize += size
+		//statFiles[level] = num
+		//statSizes[level] = shortenb(int(size))
+		//statScore[level] = fmt.Sprintf("%.2f", score)
+		//statTotSize += size
 	}
 
 	// v.s.logf("version@stat F·%v S·%s%v Sc·%v", statFiles, shortenb(int(statTotSize)), statSizes, statScore)
@@ -602,6 +602,11 @@ func (p *versionStaging) finish(trivial bool) *version {
 	for ; n > 0 && nv.levels[n-1] == nil; n-- {
 	}
 	nv.levels = nv.levels[:n]
+
+	// Calculate total size, todo can be optimized by operated on delta
+	for i := 0; i < len(nv.levels); i++ {
+		nv.levelsize = append(nv.levelsize, nv.levels[i].size())
+	}
 	return nv
 }
 
