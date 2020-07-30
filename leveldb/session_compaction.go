@@ -319,29 +319,35 @@ func (c *compaction) expand(ctx *compactionContext) bool {
 		return false
 	}
 	// Get entire range covered by compaction.
-	amin, amax := append(t0, t1...).getRange(c.s.icmp, c.sourceLevel == 0)
+	amin, amax := append(t0, t1...).getRange(c.s.icmp, true)
 
 	// See if we can grow the number of inputs in "sourceLevel" without
 	// changing the number of "sourceLevel+1" files we pick up.
 	if len(t1) > 0 {
 		exp0 := vt0.getOverlaps(nil, c.s.icmp, amin.ukey(), amax.ukey(), c.sourceLevel == 0)
-		skip := ctx.removing(c.sourceLevel).hasFiles(exp0) || ctx.recreating(c.sourceLevel).hasFiles(exp0)
-		if len(exp0) > len(t0) && t1.size()+exp0.size() < limit && !skip {
-			xmin, xmax := exp0.getRange(c.s.icmp, c.sourceLevel == 0)
-			exp1 := vt1.getOverlaps(nil, c.s.icmp, xmin.ukey(), xmax.ukey(), false)
-			if len(exp1) == len(t1) {
-				c.s.logf("table@compaction expanding L%d+L%d (F·%d S·%s)+(F·%d S·%s) -> (F·%d S·%s)+(F·%d S·%s)",
-					c.sourceLevel, c.sourceLevel+1, len(t0), shortenb(int(t0.size())), len(t1), shortenb(int(t1.size())),
-					len(exp0), shortenb(int(exp0.size())), len(exp1), shortenb(int(exp1.size())))
-				imin, imax = xmin, xmax
-				t0, t1 = exp0, exp1
-				amin, amax = append(t0, t1...).getRange(c.s.icmp, c.sourceLevel == 0)
+		if len(exp0) > len(t0) && t1.size()+exp0.size() < limit {
+			skip := ctx.removing(c.sourceLevel).hasFiles(exp0) || ctx.recreating(c.sourceLevel).hasFiles(exp0)
+			if !skip {
+				xmin, xmax := exp0.getRange(c.s.icmp, c.sourceLevel == 0)
+				exp1 := vt1.getOverlaps(nil, c.s.icmp, xmin.ukey(), xmax.ukey(), false)
+				if len(exp1) == len(t1) {
+					c.s.logf("table@compaction expanding L%d+L%d (F·%d S·%s)+(F·%d S·%s) -> (F·%d S·%s)+(F·%d S·%s)",
+						c.sourceLevel, c.sourceLevel+1, len(t0), shortenb(int(t0.size())), len(t1), shortenb(int(t1.size())),
+						len(exp0), shortenb(int(exp0.size())), len(exp1), shortenb(int(exp1.size())))
+					imin, imax = xmin, xmax
+					t0, t1 = exp0, exp1
+					amin, amax = append(t0, t1...).getRange(c.s.icmp, c.sourceLevel == 0)
+				}
 			}
 		}
 	}
 
 	// Compute the set of grandparent files that overlap this compaction
 	// (parent == sourceLevel+1; grandparent == sourceLevel+2)
+	//
+	// Note the tables overlapped in the grandparent level may are removing.
+	// We don't care about it seems the only downside is we split in tables
+	// in the parent level but actually we don't need.
 	if level := c.sourceLevel + 2; level < len(c.v.levels) {
 		c.gp = c.v.levels[level].getOverlaps(c.gp, c.s.icmp, amin.ukey(), amax.ukey(), false)
 	}

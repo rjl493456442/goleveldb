@@ -366,11 +366,6 @@ func (v *version) computeCompaction(ctx *compactionContext) int {
 	bestLevel := int(-1)
 	bestScore := float64(-1)
 
-	//statFiles := make([]int, len(v.levels))
-	//statSizes := make([]string, len(v.levels))
-	//statScore := make([]string, len(v.levels))
-	//statTotSize := int64(0)
-
 	for level, tables := range v.levels {
 		var (
 			score float64
@@ -405,12 +400,16 @@ func (v *version) computeCompaction(ctx *compactionContext) int {
 			cs := ctx.get(level)
 			for _, comp := range cs {
 				size -= comp.levels[0].size()
-				num -= comp.levels[0].Len()
 			}
+			// If there are some level-1 compactions, assume these compaction will
+			// succeed eventually and all data will be flushed into this level.
+			// It's helpful for level1 especially. Usually level0 is a "BIG" compaction
+			// and may run for a longtime. In this case, we can schedule level1 compaction
+			// earlier instead of just waiting. If the previous compaction is failed,
+			// it doesn't really matter.
 			cs = ctx.get(level - 1)
 			for _, comp := range cs {
-				size -= comp.levels[1].size()
-				num -= comp.levels[1].Len()
+				size += comp.levels[0].size()
 			}
 			score = float64(size) / float64(v.s.o.GetCompactionTotalSize(level))
 		}
@@ -421,14 +420,7 @@ func (v *version) computeCompaction(ctx *compactionContext) int {
 			bestLevel = level
 			bestScore = score
 		}
-		//statFiles[level] = num
-		//statSizes[level] = shortenb(int(size))
-		//statScore[level] = fmt.Sprintf("%.2f", score)
-		//statTotSize += size
 	}
-
-	// v.s.logf("version@stat F·%v S·%s%v Sc·%v", statFiles, shortenb(int(statTotSize)), statSizes, statScore)
-
 	if bestScore >= 1 {
 		return bestLevel
 	}

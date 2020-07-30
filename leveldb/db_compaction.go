@@ -640,6 +640,7 @@ func (db *DB) tableCompaction(c *compaction, noTrivial bool, done func(*compacti
 	}
 }
 
+// todo tableRangeCompaction is suitable for making it concurrent.
 func (db *DB) tableRangeCompaction(level int, umin, umax []byte) error {
 	db.logf("table@compaction range L%d %q:%q", level, umin, umax)
 	if level >= 0 {
@@ -1082,10 +1083,9 @@ func (db *DB) tCompaction() {
 			case cRange:
 				if ctx.count() > 0 {
 					rangeCmd = x
-					x = nil
-					continue
+				} else {
+					x.ack(db.tableRangeCompaction(cmd.level, cmd.min, cmd.max))
 				}
-				x.ack(db.tableRangeCompaction(cmd.level, cmd.min, cmd.max))
 			default:
 				panic("leveldb: unknown command")
 			}
@@ -1097,14 +1097,16 @@ func (db *DB) tCompaction() {
 			c = db.s.pickCompactionByLevel(level, ctx)
 			if c == nil {
 				// We can't pick one more isolated compaction in level n.
-				// Mark the entire level as unavailable.
+				// Mark the entire level as unavailable. In theory it shouldn't
+				// happen a lot.
 				ctx.denylist[level] = struct{}{}
 				continue
 			}
 		} else {
 			c = db.s.pickCompactionByTable(level, table, ctx)
 			if c == nil {
-				// The involved tables are not available now. Mark the seek compaction as unavailable.
+				// The involved tables are not available now. Mark the seek
+				// compaction as unavailable.
 				ctx.noseek = true
 				continue
 			}
@@ -1113,6 +1115,7 @@ func (db *DB) tCompaction() {
 		fmt.Println("Running compaction", "level", c.sourceLevel, "input", len(c.levels[0]), "parent", len(c.levels[1]), "thread", ctx.count())
 		subWg.Add(1)
 		go func() {
+			// Catch the panic in its own goroutine.
 			defer func() {
 				if x := recover(); x != nil {
 					if x != errCompactionTransactExiting {

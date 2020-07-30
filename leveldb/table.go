@@ -298,7 +298,6 @@ func (tf tFiles) getRange(icmp *iComparer, overlapped bool) (imin, imax internal
 	return
 }
 
-// todo it can be optimized
 func (tf tFiles) hasFiles(fs tFiles) bool {
 	if len(tf) == 0 {
 		return false
