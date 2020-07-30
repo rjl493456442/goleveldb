@@ -865,6 +865,7 @@ func (ctx *compactionContext) delete(c *compaction) {
 			break
 		}
 	}
+	ctx.reset(c.sourceLevel)
 	return
 }
 
@@ -934,7 +935,10 @@ func (ctx *compactionContext) recreating(level int) tFiles {
 // selecting isolated files to compact concurrently.
 //
 // For level0 compaction, concurrency is not allowed. Since we can't guarantee two
-// level0 compactions are not overlapped.
+// level0 compactions are not overlapped. But we do see that level0 compaction in
+// some sense become the bottleneck, it can slow down/suspend write operations if
+// it's not fast enough. Also if level0 compaction can't generate sstables fast
+// enough, the non-level0 compactors may become idle.
 //
 // For non-level0 compaction, concurrency is allowed if two compactions are totally
 // isolated.
@@ -980,7 +984,9 @@ func (db *DB) tCompaction() {
 		subWg    sync.WaitGroup
 	)
 	defer func() {
-		// Panic catcher for potential range compaction
+		// Panic catcher for potential range compaction.
+		// For all other compactions the panic will be
+		// caught in their own routine.
 		if x := recover(); x != nil {
 			if x != errCompactionTransactExiting {
 				panic(x)
@@ -1019,7 +1025,6 @@ func (db *DB) tCompaction() {
 			//	continue
 			case c := <-done:
 				ctx.delete(c)
-				ctx.reset(c.sourceLevel)
 				continue
 			default:
 			}
@@ -1054,7 +1059,6 @@ func (db *DB) tCompaction() {
 			//	continue
 			case c := <-done:
 				ctx.delete(c)
-				ctx.reset(c.sourceLevel)
 				continue
 			}
 		}
@@ -1072,6 +1076,7 @@ func (db *DB) tCompaction() {
 			case cRange:
 				if ctx.count() > 0 {
 					rangeCmd = x
+					x = nil
 					continue
 				}
 				x.ack(db.tableRangeCompaction(cmd.level, cmd.min, cmd.max))
@@ -1079,9 +1084,6 @@ func (db *DB) tCompaction() {
 				panic("leveldb: unknown command")
 			}
 			x = nil
-		}
-		// If it's triggered by external, reloop
-		if level == -1 {
 			continue
 		}
 		var c *compaction
@@ -1116,7 +1118,7 @@ func (db *DB) tCompaction() {
 
 			db.tableCompaction(c, false, func(c *compaction) {
 				select {
-				case done <-c:
+				case done <- c:
 				case <-db.closeC:
 				}
 				fmt.Println("Compaction done", "level", c.sourceLevel, "input", len(c.levels[0]), "parent", len(c.levels[1]))

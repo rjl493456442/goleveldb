@@ -120,7 +120,7 @@ func (s *session) pickMore(level int, v *version, ctx *compactionContext) *compa
 	tables := v.levels[level]
 	if !reverse {
 		p := sort.Search(len(tables), func(i int) bool {
-			return s.icmp.Compare(tables[i].imax, start) > 0
+			return s.icmp.Compare(tables[i].imax, limit) > 0
 		})
 		for i := p; i < len(tables); i++ {
 			c := newCompaction(s, v, level, tFiles{tables[i]}, typ, ctx)
@@ -168,8 +168,14 @@ func (s *session) pickCompactionByLevel(level int, ctx *compactionContext) (comp
 	return s.pickMore(level, v, ctx)
 }
 
-func (s *session) pickCompactionByTable(level int, table *tFile, ctx *compactionContext) *compaction {
-	return newCompaction(s, s.version(), level, []*tFile{table}, seekCompaction, ctx)
+func (s *session) pickCompactionByTable(level int, table *tFile, ctx *compactionContext) (comp *compaction) {
+	v := s.version()
+	defer func() {
+		if comp == nil {
+			v.release()
+		}
+	}()
+	return newCompaction(s, v, level, []*tFile{table}, seekCompaction, ctx)
 }
 
 // Create compaction from given level and range; need external synchronization.
