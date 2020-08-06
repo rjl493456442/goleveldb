@@ -342,7 +342,7 @@ func (h *dbHarness) getKeyVal(want string) {
 func (h *dbHarness) waitCompaction() {
 	t := h.t
 	db := h.db
-	if err := db.compTriggerWait(db.tcompCmdC); err != nil {
+	if err := db.waitAllTableComp(); err != nil {
 		t.Error("compaction error: ", err)
 	}
 }

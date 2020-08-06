@@ -710,8 +710,13 @@ type cCmd interface {
 }
 
 type cAuto struct {
-	// Note for table compaction, an non-empty ackC represents it's a compaction waiting command.
+	// Note for table compaction, an non-empty ackC
+	// represents it's a compaction waiting command.
 	ackC chan<- error
+
+	// Flag whether the ack should only be sent when
+	// all compactions finished. Used for testing only.
+	full bool
 }
 
 func (r cAuto) ack(err error) {
@@ -746,13 +751,36 @@ func (db *DB) compTrigger(compC chan<- cCmd) {
 	}
 }
 
+// This will trigger auto compaction and wait for all compaction to be done.
+// Note it's only used in testing.
+func (db *DB) waitAllTableComp() (err error) {
+	ch := make(chan error)
+	defer close(ch)
+	// Send cmd.
+	select {
+	case db.tcompCmdC <- cAuto{ackC: ch, full: true}:
+	case err = <-db.compErrC:
+		return
+	case <-db.closeC:
+		return ErrClosed
+	}
+	// Wait cmd.
+	select {
+	case err = <-ch:
+	case err = <-db.compErrC:
+	case <-db.closeC:
+		return ErrClosed
+	}
+	return err
+}
+
 // This will trigger auto compaction and/or wait for all compaction to be done.
 func (db *DB) compTriggerWait(compC chan<- cCmd) (err error) {
 	ch := make(chan error)
 	defer close(ch)
 	// Send cmd.
 	select {
-	case compC <- cAuto{ch}:
+	case compC <- cAuto{ackC: ch}:
 	case err = <-db.compErrC:
 		return
 	case <-db.closeC:
@@ -982,11 +1010,14 @@ func (db *DB) tCompaction() {
 			icmp:     db.s.icmp,
 			denylist: make(map[int]struct{}),
 		}
-		done     = make(chan *compaction)
+		done  = make(chan *compaction)
+		subWg sync.WaitGroup
+
+		// Various waiting list
 		x        cCmd
-		waitQ    []cCmd
-		rangeCmd cCmd
-		subWg    sync.WaitGroup
+		waitQ    []cCmd // Waiting list will be activated if the level0 tables less then threshold
+		waitAll  []cCmd // Waiting list will be activated iff all compactions have finished.
+		rangeCmd cCmd   // Single range compaction waiting channel
 	)
 	defer func() {
 		// Panic catcher for potential range compaction.
@@ -1001,6 +1032,10 @@ func (db *DB) tCompaction() {
 		for i := range waitQ {
 			waitQ[i].ack(ErrClosed)
 			waitQ[i] = nil
+		}
+		for i := range waitAll {
+			waitAll[i].ack(ErrClosed)
+			waitAll[i] = nil
 		}
 		if x != nil {
 			x.ack(ErrClosed)
@@ -1033,7 +1068,8 @@ func (db *DB) tCompaction() {
 				continue
 			default:
 			}
-			// Resume write operation as soon as possible.
+			// Send ack signal to all waiting channels for resuming
+			// db operation(e.g. writes).
 			if len(waitQ) > 0 && db.resumeWrite() {
 				for i := range waitQ {
 					waitQ[i].ack(nil)
@@ -1055,6 +1091,14 @@ func (db *DB) tCompaction() {
 				rangeCmd = nil
 				continue // Re-loop is necessary, try to spin up more compactions
 			}
+			// If the waitAll list is not empty, send the ack if all compactions have finished.
+			if ctx.count() == 0 && len(waitAll) != 0 {
+				for _, wait := range waitAll {
+					wait.ack(nil)
+					wait = nil
+				}
+				waitAll = waitAll[:0]
+			}
 			select {
 			case <-db.closeC:
 				return
@@ -1070,7 +1114,9 @@ func (db *DB) tCompaction() {
 		if x != nil {
 			switch cmd := x.(type) {
 			case cAuto:
-				if cmd.ackC != nil {
+				if cmd.full {
+					waitAll = append(waitAll, cmd)
+				} else if cmd.ackC != nil {
 					// Check the write pause state before caching it.
 					if db.resumeWrite() {
 						x.ack(nil)
