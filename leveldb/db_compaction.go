@@ -1047,6 +1047,15 @@ func (db *DB) tCompaction() {
 	}()
 
 	for {
+		// Send ack signal to all waiting channels for resuming
+		// db operation(e.g. writes).
+		if len(waitQ) > 0 && db.resumeWrite() {
+			for i := range waitQ {
+				waitQ[i].ack(nil)
+				waitQ[i] = nil
+			}
+			waitQ = waitQ[:0]
+		}
 		var (
 			needCompact bool
 			level       int
@@ -1068,22 +1077,7 @@ func (db *DB) tCompaction() {
 				continue
 			default:
 			}
-			// Send ack signal to all waiting channels for resuming
-			// db operation(e.g. writes).
-			if len(waitQ) > 0 && db.resumeWrite() {
-				for i := range waitQ {
-					waitQ[i].ack(nil)
-					waitQ[i] = nil
-				}
-				waitQ = waitQ[:0]
-			}
 		} else {
-			for i := range waitQ {
-				waitQ[i].ack(nil)
-				waitQ[i] = nil
-			}
-			waitQ = waitQ[:0]
-
 			// If there is a pending range compaction, do it right now
 			if rangeCmd != nil && ctx.count() == 0 {
 				cmd := rangeCmd.(cRange)
@@ -1092,7 +1086,7 @@ func (db *DB) tCompaction() {
 				continue // Re-loop is necessary, try to spin up more compactions
 			}
 			// If the waitAll list is not empty, send the ack if all compactions have finished.
-			if ctx.count() == 0 && len(waitAll) != 0 {
+			if len(waitAll) != 0 && ctx.count() == 0 {
 				for _, wait := range waitAll {
 					wait.ack(nil)
 					wait = nil
@@ -1117,12 +1111,7 @@ func (db *DB) tCompaction() {
 				if cmd.full {
 					waitAll = append(waitAll, cmd)
 				} else if cmd.ackC != nil {
-					// Check the write pause state before caching it.
-					if db.resumeWrite() {
-						x.ack(nil)
-					} else {
-						waitQ = append(waitQ, x)
-					}
+					waitQ = append(waitQ, x)
 				}
 			case cRange:
 				if ctx.count() > 0 {
@@ -1136,45 +1125,49 @@ func (db *DB) tCompaction() {
 			x = nil
 			continue
 		}
-		var c *compaction
-		if table == nil {
-			c = db.s.pickCompactionByLevel(level, ctx)
-			if c == nil {
-				// We can't pick one more isolated compaction in level n.
-				// Mark the entire level as unavailable. In theory it shouldn't
-				// happen a lot.
-				ctx.denylist[level] = struct{}{}
-				continue
-			}
-		} else {
-			c = db.s.pickCompactionByTable(level, table, ctx)
-			if c == nil {
-				// The involved tables are not available now. Mark the seek
-				// compaction as unavailable.
-				ctx.noseek = true
-				continue
-			}
-		}
-		ctx.add(c)
-		subWg.Add(1)
-
-		go func() {
-			// Catch the panic in its own goroutine.
-			defer func() {
-				if x := recover(); x != nil {
-					if x != errCompactionTransactExiting {
-						panic(x)
-					}
-				}
-			}()
-			defer subWg.Done()
-
-			db.tableCompaction(c, false, func(c *compaction) {
-				select {
-				case done <- c:
-				case <-db.closeC:
-				}
-			})
-		}()
+		db.runCompaction(ctx, level, table, &subWg, done)
 	}
+}
+
+func (db *DB) runCompaction(ctx *compactionContext, level int, table *tFile, wg *sync.WaitGroup, done chan *compaction) {
+	var c *compaction
+	if table == nil {
+		c = db.s.pickCompactionByLevel(level, ctx)
+		if c == nil {
+			// We can't pick one more isolated compaction in level n.
+			// Mark the entire level as unavailable. In theory it shouldn't
+			// happen a lot.
+			ctx.denylist[level] = struct{}{}
+			return
+		}
+	} else {
+		c = db.s.pickCompactionByTable(level, table, ctx)
+		if c == nil {
+			// The involved tables are not available now. Mark the seek
+			// compaction as unavailable.
+			ctx.noseek = true
+			return
+		}
+	}
+	ctx.add(c)
+	wg.Add(1)
+
+	go func() {
+		// Catch the panic in its own goroutine.
+		defer func() {
+			if x := recover(); x != nil {
+				if x != errCompactionTransactExiting {
+					panic(x)
+				}
+			}
+		}()
+		defer wg.Done()
+
+		db.tableCompaction(c, false, func(c *compaction) {
+			select {
+			case done <- c:
+			case <-db.closeC:
+			}
+		})
+	}()
 }
