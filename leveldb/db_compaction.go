@@ -1047,15 +1047,6 @@ func (db *DB) tCompaction() {
 	}()
 
 	for {
-		// Send ack signal to all waiting channels for resuming
-		// db operation(e.g. writes).
-		if len(waitQ) > 0 && db.resumeWrite() {
-			for i := range waitQ {
-				waitQ[i].ack(nil)
-				waitQ[i] = nil
-			}
-			waitQ = waitQ[:0]
-		}
 		var (
 			needCompact bool
 			level       int
@@ -1077,7 +1068,21 @@ func (db *DB) tCompaction() {
 				continue
 			default:
 			}
+			// Send ack signal to all waiting channels for resuming
+			// db operation(e.g. writes).
+			if len(waitQ) > 0 && db.resumeWrite() {
+				for i := range waitQ {
+					waitQ[i].ack(nil)
+					waitQ[i] = nil
+				}
+				waitQ = waitQ[:0]
+			}
 		} else {
+			for i := range waitQ {
+				waitQ[i].ack(nil)
+				waitQ[i] = nil
+			}
+			waitQ = waitQ[:0]
 			// If there is a pending range compaction, do it right now
 			if rangeCmd != nil && ctx.count() == 0 {
 				cmd := rangeCmd.(cRange)
