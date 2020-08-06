@@ -7,7 +7,6 @@
 package leveldb
 
 import (
-	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -1111,8 +1110,8 @@ func (db *DB) tCompaction() {
 			}
 		}
 		ctx.add(c)
-		fmt.Println("Running compaction", "level", c.sourceLevel, "input", len(c.levels[0]), "parent", len(c.levels[1]), "thread", ctx.count())
 		subWg.Add(1)
+
 		go func() {
 			// Catch the panic in its own goroutine.
 			defer func() {
@@ -1129,7 +1128,6 @@ func (db *DB) tCompaction() {
 				case done <- c:
 				case <-db.closeC:
 				}
-				fmt.Println("Compaction done", "level", c.sourceLevel, "input", len(c.levels[0]), "parent", len(c.levels[1]))
 			})
 		}()
 	}

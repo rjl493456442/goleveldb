@@ -300,7 +300,7 @@ func (c *compaction) expand(ctx *compactionContext) bool {
 			imin, imax = t0.getRange(c.s.icmp, true)
 		}
 	}
-	if c.sourceLevel != 0 {
+	if c.sourceLevel != 0 && ctx != nil {
 		// Ensure the source level files are not the input of other compactions.
 		if ctx.removing(c.sourceLevel).hasFiles(t0) {
 			return false
@@ -312,11 +312,13 @@ func (c *compaction) expand(ctx *compactionContext) bool {
 	t1 = vt1.getOverlaps(t1, c.s.icmp, imin.ukey(), imax.ukey(), false)
 
 	// If the overlapped tables in level n+1 are not available, abort the expansion
-	if ctx.recreating(c.sourceLevel + 1).hasFiles(t1) {
-		return false
-	}
-	if ctx.removing(c.sourceLevel + 1).hasFiles(t1) {
-		return false
+	if ctx != nil {
+		if ctx.recreating(c.sourceLevel + 1).hasFiles(t1) {
+			return false
+		}
+		if ctx.removing(c.sourceLevel + 1).hasFiles(t1) {
+			return false
+		}
 	}
 	// Get entire range covered by compaction.
 	amin, amax := append(t0, t1...).getRange(c.s.icmp, true)
@@ -326,7 +328,10 @@ func (c *compaction) expand(ctx *compactionContext) bool {
 	if len(t1) > 0 {
 		exp0 := vt0.getOverlaps(nil, c.s.icmp, amin.ukey(), amax.ukey(), c.sourceLevel == 0)
 		if len(exp0) > len(t0) && t1.size()+exp0.size() < limit {
-			skip := ctx.removing(c.sourceLevel).hasFiles(exp0) || ctx.recreating(c.sourceLevel).hasFiles(exp0)
+			var skip bool
+			if ctx != nil {
+				skip = ctx.removing(c.sourceLevel).hasFiles(exp0) || ctx.recreating(c.sourceLevel).hasFiles(exp0)
+			}
 			if !skip {
 				xmin, xmax := exp0.getRange(c.s.icmp, c.sourceLevel == 0)
 				exp1 := vt1.getOverlaps(nil, c.s.icmp, xmin.ukey(), xmax.ukey(), false)
