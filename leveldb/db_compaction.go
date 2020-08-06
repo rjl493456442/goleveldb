@@ -640,7 +640,6 @@ func (db *DB) tableCompaction(c *compaction, noTrivial bool, done func(*compacti
 	}
 }
 
-// todo tableRangeCompaction is suitable for making it concurrent.
 func (db *DB) tableRangeCompaction(level int, umin, umax []byte) error {
 	db.logf("table@compaction range L%d %q:%q", level, umin, umax)
 	if level >= 0 {
