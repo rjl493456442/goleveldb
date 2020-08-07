@@ -7,6 +7,7 @@
 package leveldb
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -655,6 +656,7 @@ func (db *DB) tableRangeCompaction(level int, umin, umax []byte) error {
 		}
 		v.release()
 		for i := 0; i < m; i++ {
+			fmt.Println("===============> range compaction at", i)
 			err := db.tableRangeCompactionAt(i, umin, umax)
 			if err != nil {
 				return err
@@ -717,6 +719,7 @@ func (db *DB) tableRangeCompactionAt(level int, umin, umax []byte) error {
 				}()
 				defer subWg.Done()
 
+				fmt.Println("run compaction", "level", comp.sourceLevel)
 				db.tableCompaction(comp, false, func(c *compaction) {
 					select {
 					case done <- c:
@@ -1143,6 +1146,7 @@ func (db *DB) tCompaction() {
 			// If there is a pending range compaction, do it right now
 			if rangeCmd != nil && ctx.count() == 0 {
 				cmd := rangeCmd.(cRange)
+				fmt.Println("Running range compaction!")
 				cmd.ack(db.tableRangeCompaction(cmd.level, cmd.min, cmd.max))
 				rangeCmd = nil
 				continue // Re-loop is necessary, try to spin up more compactions
@@ -1179,6 +1183,7 @@ func (db *DB) tCompaction() {
 				if ctx.count() > 0 {
 					rangeCmd = x
 				} else {
+					fmt.Println("Running range compaction!")
 					x.ack(db.tableRangeCompaction(cmd.level, cmd.min, cmd.max))
 				}
 			default:
