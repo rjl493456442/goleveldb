@@ -966,7 +966,6 @@ func TestDB_RecoverWithLargeJournal(t *testing.T) {
 }
 
 func TestDB_CompactionsGenerateMultipleFiles(t *testing.T) {
-	t.Skip("")
 	h := newDbHarnessWopt(t, &opt.Options{
 		DisableLargeBatchTransaction: true,
 		WriteBuffer:                  10000000,
@@ -986,20 +985,11 @@ func TestDB_CompactionsGenerateMultipleFiles(t *testing.T) {
 	for i := 0; i < n; i++ {
 		h.put(numKey(i), strings.Repeat(fmt.Sprintf("v%09d", i), 100000/10))
 	}
-
 	// Reopening moves updates to level-0
 	h.reopenDB()
 	h.compactRangeAt(0, "", "")
 
 	v = h.db.s.version()
-	fmt.Println("====================== FILES ======================")
-	for index, level := range v.levels {
-		fmt.Println(">>>>>>> LEVEL", index)
-		for _, f := range level {
-			fmt.Printf("\tTABLE %d SIZE %d %s->%s", f.fd.Num, f.size, f.imin, f.imax)
-		}
-		fmt.Println("")
-	}
 	if v.tLen(0) > 0 {
 		t.Errorf("level-0 tables more than 0, got %d", v.tLen(0))
 	}
@@ -1659,7 +1649,6 @@ func TestDB_CustomComparer(t *testing.T) {
 }
 
 func TestDB_ManualCompaction(t *testing.T) {
-	t.Skip("")
 	h := newDbHarness(t)
 	defer h.close()
 
@@ -1671,38 +1660,31 @@ func TestDB_ManualCompaction(t *testing.T) {
 	// Compaction range falls before files
 	h.compactRange("", "c")
 	h.tablesPerLevel("1,1,1")
-	fmt.Println("--------------------> OK 1")
 
 	// Compaction range falls after files
 	h.compactRange("r", "z")
 	h.tablesPerLevel("1,1,1")
-	fmt.Println("--------------------> OK 2")
 
 	// Compaction range overlaps files
 	h.compactRange("p1", "p9")
 	h.tablesPerLevel("0,0,1")
-	fmt.Println("--------------------> OK 3")
 
 	// Populate a different range
 	h.putMulti(3, "c", "e")
 	h.tablesPerLevel("1,1,2")
-	fmt.Println("--------------------> OK 4")
 
 	// Compact just the new range
 	h.compactRange("b", "f")
 	h.tablesPerLevel("0,0,2")
-	fmt.Println("--------------------> OK 5")
 
 	// Compact all
 	h.putMulti(1, "a", "z")
 	h.tablesPerLevel("0,1,2")
 	h.compactRange("", "")
 	h.tablesPerLevel("0,0,1")
-	fmt.Println("--------------------> OK 6")
 }
 
 func TestDB_BloomFilter(t *testing.T) {
-	t.Skip("")
 	h := newDbHarnessWopt(t, &opt.Options{
 		DisableLargeBatchTransaction: true,
 		DisableBlockCache:            true,

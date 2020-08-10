@@ -289,6 +289,7 @@ func (s *session) getCompactionRange(ctx *compactionContext, sourceLevel int, um
 		return s.getFirstRange(v, ctx, sourceLevel, umin, umax, typ, limit)
 	}
 	if sourceLevel == 0 {
+		v.release()
 		return nil
 	}
 	return s.getMoreRange(v, ctx, sourceLevel, umin, umax, typ, limit)
