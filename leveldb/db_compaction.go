@@ -7,6 +7,7 @@
 package leveldb
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -1164,6 +1165,14 @@ func (db *DB) runCompaction(ctx *compactionContext, level int, table *tFile, wg 
 		defer wg.Done()
 
 		db.tableCompaction(c, false, func(c *compaction) {
+			var msg string
+			for _, table := range c.levels[0] {
+				msg += fmt.Sprintf("I-0<%d> ", table.fd.Num)
+			}
+			for _, table := range c.levels[1] {
+				msg += fmt.Sprintf("I-1<%d> ", table.fd.Num)
+			}
+			fmt.Printf("table compaction DONE files %s\n", msg)
 			select {
 			case done <- c:
 			case <-db.closeC:

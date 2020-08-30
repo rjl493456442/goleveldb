@@ -79,14 +79,14 @@ func (s *session) refLoop() {
 	)
 	// addFileRef adds file reference counter with specified file number and
 	// reference value
-	addFileRef := func(fnum int64, ref int) int {
+	addFileRef := func(fnum int64, ref int, msg string) int {
 		ref += fileRef[fnum]
 		if ref > 0 {
 			fileRef[fnum] = ref
 		} else if ref == 0 {
 			delete(fileRef, fnum)
 		} else {
-			panic(fmt.Sprintf("negative ref: %v", fnum))
+			panic(fmt.Sprintf("negative ref: %v %s", fnum, msg))
 		}
 		return ref
 	}
@@ -99,12 +99,12 @@ func (s *session) refLoop() {
 		return false
 	}
 	// applyDelta applies version change to current file reference.
-	applyDelta := func(d *vDelta) {
+	applyDelta := func(d *vDelta, typ string) {
 		for _, t := range d.added {
-			addFileRef(t, 1)
+			addFileRef(t, 1, "apply-delta: add ref")
 		}
 		for _, t := range d.deleted {
-			if addFileRef(t, -1) == 0 {
+			if addFileRef(t, -1, fmt.Sprintf("apply-delta: sub ref %s", typ)) == 0 {
 				s.tops.remove(storage.FileDesc{Type: storage.TypeTable, Num: t})
 			}
 		}
@@ -149,7 +149,7 @@ func (s *session) refLoop() {
 			// FileRef(i+1) = FileRef(i) + Delta(i)
 			for _, tt := range ref[next].files {
 				for _, t := range tt {
-					addFileRef(t.fd.Num, 1)
+					addFileRef(t.fd.Num, 1, "full ref: add ref") // source = 2
 				}
 			}
 			// Note, if some compactions take a long time, even more than 5 minutes,
@@ -157,7 +157,7 @@ func (s *session) refLoop() {
 			// Fortunately it will not affect the correctness of the file reference,
 			// and we can apply the delta once we receive it.
 			if d := deltas[next]; d != nil {
-				applyDelta(d)
+				applyDelta(d, "[FULL]")
 			}
 			referenced[next] = struct{}{}
 			delete(ref, next)
@@ -173,7 +173,7 @@ func (s *session) refLoop() {
 			}
 			if d, exist := released[next]; exist {
 				if d != nil {
-					applyDelta(d)
+					applyDelta(d, "[NORMAL]")
 				}
 				delete(released, next)
 				next += 1
@@ -203,7 +203,7 @@ func (s *session) refLoop() {
 				}
 				// The reference opt is already expired, apply
 				// delta here.
-				applyDelta(d)
+				applyDelta(d, "EXPIRE")
 				continue
 			}
 			deltas[d.vid] = d
@@ -212,7 +212,7 @@ func (s *session) refLoop() {
 			if _, exist := referenced[t.vid]; exist {
 				for _, tt := range t.files {
 					for _, t := range tt {
-						if addFileRef(t.fd.Num, -1) == 0 {
+						if addFileRef(t.fd.Num, -1, "full ref: sub ref") == 0 {
 							s.tops.remove(t.fd)
 						}
 					}

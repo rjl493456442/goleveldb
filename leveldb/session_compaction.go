@@ -7,6 +7,7 @@
 package leveldb
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/syndtr/goleveldb/leveldb/iterator"
@@ -360,6 +361,14 @@ func (c *compaction) expand(ctx *compactionContext) bool {
 	c.levels[0], c.levels[1] = t0, t1
 	c.imin, c.imax = imin, imax
 
+	var msg string
+	for _, table := range c.levels[0] {
+		msg += fmt.Sprintf("I-0<%d> ", table.fd.Num)
+	}
+	for _, table := range c.levels[1] {
+		msg += fmt.Sprintf("I-1<%d> ", table.fd.Num)
+	}
+	fmt.Printf("table compaction pick files %s\n", msg)
 	return true
 }
 
