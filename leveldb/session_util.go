@@ -329,6 +329,8 @@ func (s *session) reuseFileNum(num int64) {
 		old, x := atomic.LoadInt64(&s.stNextFileNum), num
 		if old != x+1 {
 			x = old
+		} else {
+			fmt.Println("reuse file number", num)
 		}
 		if atomic.CompareAndSwapInt64(&s.stNextFileNum, old, x) {
 			break

@@ -446,6 +446,7 @@ func (b *tableCompactionBuilder) flush() error {
 	b.stat1.write += t.size
 	b.s.logf("table@build created L%d@%d N·%d S·%s %q:%q", b.c.sourceLevel+1, t.fd.Num, b.tw.tw.EntriesLen(), shortenb(int(t.size)), t.imin, t.imax)
 	b.tw = nil
+	b.c.output = append(b.c.output, t)
 	return nil
 }
 
@@ -1171,6 +1172,9 @@ func (db *DB) runCompaction(ctx *compactionContext, level int, table *tFile, wg 
 			}
 			for _, table := range c.levels[1] {
 				msg += fmt.Sprintf("I-1<%d> ", table.fd.Num)
+			}
+			for _, table := range c.output {
+				msg += fmt.Sprintf("O<%d> ", table.fd.Num)
 			}
 			fmt.Printf("table compaction DONE files %s\n", msg)
 			select {

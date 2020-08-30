@@ -244,6 +244,7 @@ type compaction struct {
 	typ           int
 	sourceLevel   int
 	levels        [2]tFiles
+	output        tFiles
 	maxGPOverlaps int64
 
 	gp                tFiles
