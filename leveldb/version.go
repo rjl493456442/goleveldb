@@ -428,6 +428,10 @@ func (v *version) needCompaction(ctx *compactionContext) (needCompact bool, leve
 	if p := atomic.LoadPointer(&v.cSeek); p != nil && !ctx.noseek {
 		ts := (*tSet)(p)
 
+		// Don't spin anymore level0 compaction if there is one ongoing
+		if ts.level == 0 && ctx != nil && len(ctx.get(0)) > 0 {
+			return false, -1, nil
+		}
 		// Ensure the source table is not picked as the input of level
 		// N compactions or level N-1 compactions.
 		if ctx.removing(ts.level).hasFiles(tFiles{ts.table}) {
