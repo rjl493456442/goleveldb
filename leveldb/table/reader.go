@@ -787,7 +787,7 @@ func (r *Reader) getDataIterErr(dataBH blockHandle, slice *util.Range, verifyChe
 // table. And a nil Range.Limit is treated as a key after all keys in
 // the table.
 //
-// WARNING: Any slice returned by interator (e.g. slice returned by calling
+// WARNING: Any slice returned by iterator (e.g. slice returned by calling
 // Iterator.Key() or Iterator.Key() methods), its content should not be modified
 // unless noted otherwise.
 //
@@ -1020,6 +1020,10 @@ func (r *Reader) Release() {
 
 // NewReader creates a new initialized table reader for the file.
 // The fi, cache and bpool is optional and can be nil.
+//
+// The metadata of the table(index block, filter block) will only
+// be preloaded if the `preload` is true and the given cache is nil.
+// Otherwise, load them only when accessing.
 //
 // The returned table reader instance is safe for concurrent use.
 func NewReader(f io.ReaderAt, size int64, fd storage.FileDesc, cache *cache.NamespaceGetter, bpool *util.BufferPool, o *opt.Options) (*Reader, error) {

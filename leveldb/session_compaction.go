@@ -317,7 +317,7 @@ func (c *compaction) newIterator() iterator.Iterator {
 		// Level-0 is not sorted and may overlaps each other.
 		if c.sourceLevel+i == 0 {
 			for _, t := range tables {
-				its = append(its, c.s.tops.newIterator(t, nil, ro))
+				its = append(its, c.s.tops.newLightIterator(t, nil, ro))
 			}
 		} else {
 			it := iterator.NewIndexedIterator(tables.newIndexIterator(c.s.tops, c.s.icmp, nil, ro), strict)
@@ -325,5 +325,5 @@ func (c *compaction) newIterator() iterator.Iterator {
 		}
 	}
 
-	return iterator.NewMergedIterator(its, c.s.icmp, strict)
+	return iterator.NewOneTimeMergedIterator(its, c.s.icmp, strict)
 }

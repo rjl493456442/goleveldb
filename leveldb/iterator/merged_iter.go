@@ -27,6 +27,13 @@ type mergedIterator struct {
 	iters  []Iterator
 	strict bool
 
+	// Fields for the light mergedIterator. The iterator
+	// can be configured as the "One Time" iterator which
+	// will release the internal iterators whenever it's
+	// exhausted.
+	onetime    bool
+	incomplete bool
+
 	keys     [][]byte
 	index    int
 	dir      dir
@@ -65,6 +72,8 @@ func (i *mergedIterator) First() bool {
 	} else if i.dir == dirReleased {
 		i.err = ErrIterReleased
 		return false
+	} else if i.incomplete {
+		return false
 	}
 
 	for x, iter := range i.iters {
@@ -87,6 +96,8 @@ func (i *mergedIterator) Last() bool {
 	} else if i.dir == dirReleased {
 		i.err = ErrIterReleased
 		return false
+	} else if i.incomplete {
+		return false
 	}
 
 	for x, iter := range i.iters {
@@ -108,6 +119,8 @@ func (i *mergedIterator) Seek(key []byte) bool {
 		return false
 	} else if i.dir == dirReleased {
 		i.err = ErrIterReleased
+		return false
+	} else if i.incomplete {
 		return false
 	}
 
@@ -154,8 +167,10 @@ func (i *mergedIterator) Next() bool {
 
 	switch i.dir {
 	case dirSOI:
+		// Exhausted, will return false if it's one-time iterator
 		return i.First()
 	case dirBackward:
+		// Will return false if some internal iterators are exhausted
 		key := append([]byte{}, i.keys[i.index]...)
 		if !i.Seek(key) {
 			return false
@@ -172,6 +187,13 @@ func (i *mergedIterator) Next() bool {
 		return false
 	default:
 		i.keys[x] = nil
+
+		// Release the exhausted iterator if in light mode.
+		if i.onetime {
+			i.incomplete = true
+			i.iters[x].Release()
+			i.iters[x] = nil
+		}
 	}
 	return i.next()
 }
@@ -205,12 +227,17 @@ func (i *mergedIterator) Prev() bool {
 
 	switch i.dir {
 	case dirEOI:
+		// Exhausted, will return false if it's one-time iterator
 		return i.Last()
 	case dirForward:
 		key := append([]byte{}, i.keys[i.index]...)
 		for x, iter := range i.iters {
 			if x == i.index {
 				continue
+			}
+			// Already exhausted
+			if iter == nil {
+				return false
 			}
 			seek := iter.Seek(key)
 			switch {
@@ -233,6 +260,13 @@ func (i *mergedIterator) Prev() bool {
 		return false
 	default:
 		i.keys[x] = nil
+
+		// Release the exhausted iterator if in light mode.
+		if i.onetime {
+			i.incomplete = true
+			i.iters[x].Release()
+			i.iters[x] = nil
+		}
 	}
 	return i.prev()
 }
@@ -255,7 +289,9 @@ func (i *mergedIterator) Release() {
 	if i.dir != dirReleased {
 		i.dir = dirReleased
 		for _, iter := range i.iters {
-			iter.Release()
+			if iter != nil {
+				iter.Release()
+			}
 		}
 		i.iters = nil
 		i.keys = nil
@@ -284,6 +320,16 @@ func (i *mergedIterator) SetErrorCallback(f func(err error)) {
 	i.errf = f
 }
 
+func newMergedIterator(iters []Iterator, cmp comparer.Comparer, strict bool, onetime bool) Iterator {
+	return &mergedIterator{
+		iters:   iters,
+		cmp:     cmp,
+		strict:  strict,
+		onetime: onetime,
+		keys:    make([][]byte, len(iters)),
+	}
+}
+
 // NewMergedIterator returns an iterator that merges its input. Walking the
 // resultant iterator will return all key/value pairs of all input iterators
 // in strictly increasing key order, as defined by cmp.
@@ -295,10 +341,17 @@ func (i *mergedIterator) SetErrorCallback(f func(err error)) {
 // won't be ignored and will halt 'merged iterator', otherwise the iterator will
 // continue to the next 'input iterator'.
 func NewMergedIterator(iters []Iterator, cmp comparer.Comparer, strict bool) Iterator {
-	return &mergedIterator{
-		iters:  iters,
-		cmp:    cmp,
-		strict: strict,
-		keys:   make([][]byte, len(iters)),
-	}
+	return newMergedIterator(iters, cmp, strict, false)
+}
+
+// NewOneTimeMergedIterator returns an iterator that merges its input. Walking the
+// resultant iterator will return all key/value pairs of all input iterators
+// in strictly increasing key order, as defined by cmp.
+//
+// The difference between the one time iterator with normal iterator is: all the
+// exhausted internal iterators(caused by Next and Prev) will be released immediately
+// in order to reduce the resource consumption. So it's only for one-time usage. This
+// iterator has very limited functionalities by it's suitable for the compaction.
+func NewOneTimeMergedIterator(iters []Iterator, cmp comparer.Comparer, strict bool) Iterator {
+	return newMergedIterator(iters, cmp, strict, true)
 }

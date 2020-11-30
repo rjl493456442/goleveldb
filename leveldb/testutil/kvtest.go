@@ -90,7 +90,6 @@ func TestIter(db NewIterator, r *util.Range, kv KeyValue) {
 		KeyValue: kv,
 		Iter:     iter,
 	}
-
 	DoIteratorTesting(&t)
 	iter.Release()
 }

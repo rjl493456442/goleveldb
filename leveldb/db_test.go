@@ -1721,7 +1721,7 @@ func TestDB_BloomFilter(t *testing.T) {
 	cnt, _ := h.stor.Counter(testutil.ModeRead, storage.TypeTable)
 	t.Logf("lookup of %d present keys yield %d sstable I/O reads", n, cnt)
 	if min, max := n, n+2*n/100; cnt < min || cnt > max {
-		t.Errorf("num of sstable I/O reads of present keys not in range of %d - %d, got %d", min, max, cnt)
+		t.Fatalf("num of sstable I/O reads of present keys not in range of %d - %d, got %d", min, max, cnt)
 	}
 
 	// Lookup missing keys. Should rarely read from either sstable.
@@ -1732,7 +1732,7 @@ func TestDB_BloomFilter(t *testing.T) {
 	cnt, _ = h.stor.Counter(testutil.ModeRead, storage.TypeTable)
 	t.Logf("lookup of %d missing keys yield %d sstable I/O reads", n, cnt)
 	if max := 3 * n / 100; cnt > max {
-		t.Errorf("num of sstable I/O reads of missing keys was more than %d, got %d", max, cnt)
+		t.Fatalf("num of sstable I/O reads of missing keys was more than %d, got %d", max, cnt)
 	}
 
 	h.stor.Release(testutil.ModeSync, storage.TypeTable)

@@ -418,20 +418,17 @@ func (t *tOps) open(f *tFile) (ch *cache.Handle, err error) {
 		if err != nil {
 			return 0, nil
 		}
-
 		var bcache *cache.NamespaceGetter
 		if t.bcache != nil {
 			bcache = &cache.NamespaceGetter{Cache: t.bcache, NS: uint64(f.fd.Num)}
 		}
-
-		var tr *table.Reader
-		tr, err = table.NewReader(r, f.size, f.fd, bcache, t.bpool, t.s.o.Options)
+		// Open and cache the table reader in the light mode by default
+		tr, err := table.NewLightReader(r, f.size, f.imin, f.imax, f.fd, bcache, t.bpool, t.s.o.Options)
 		if err != nil {
 			r.Close()
 			return 0, nil
 		}
 		return 1, tr
-
 	})
 	if ch == nil && err == nil {
 		err = ErrClosed
@@ -447,7 +444,7 @@ func (t *tOps) find(f *tFile, key []byte, ro *opt.ReadOptions) (rkey, rvalue []b
 		return nil, nil, err
 	}
 	defer ch.Release()
-	return ch.Value().(*table.Reader).Find(key, true, ro)
+	return ch.Value().(*table.LightReader).Find(key, true, ro)
 }
 
 // Finds key that is greater than or equal to the given key.
@@ -457,7 +454,7 @@ func (t *tOps) findKey(f *tFile, key []byte, ro *opt.ReadOptions) (rkey []byte, 
 		return nil, err
 	}
 	defer ch.Release()
-	return ch.Value().(*table.Reader).FindKey(key, true, ro)
+	return ch.Value().(*table.LightReader).FindKey(key, true, ro)
 }
 
 // Returns approximate offset of the given key.
@@ -467,7 +464,7 @@ func (t *tOps) offsetOf(f *tFile, key []byte) (offset int64, err error) {
 		return
 	}
 	defer ch.Release()
-	return ch.Value().(*table.Reader).OffsetOf(key)
+	return ch.Value().(*table.LightReader).OffsetOf(key)
 }
 
 // Creates an iterator from the given table.
@@ -476,7 +473,18 @@ func (t *tOps) newIterator(f *tFile, slice *util.Range, ro *opt.ReadOptions) ite
 	if err != nil {
 		return iterator.NewEmptyIterator(err)
 	}
-	iter := ch.Value().(*table.Reader).NewIterator(slice, ro)
+	iter := ch.Value().(*table.LightReader).ToReader().NewIterator(slice, ro)
+	iter.SetReleaser(ch)
+	return iter
+}
+
+// Creates an iterator from the given table.
+func (t *tOps) newLightIterator(f *tFile, slice *util.Range, ro *opt.ReadOptions) iterator.Iterator {
+	ch, err := t.open(f)
+	if err != nil {
+		return iterator.NewEmptyIterator(err)
+	}
+	iter := ch.Value().(*table.LightReader).NewIterator(slice, ro)
 	iter.SetReleaser(ch)
 	return iter
 }
