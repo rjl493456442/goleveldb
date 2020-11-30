@@ -411,27 +411,43 @@ func (t *tOps) createFrom(src iterator.Iterator) (f *tFile, n int, err error) {
 
 // Opens table. It returns a cache handle, which should
 // be released after use.
-func (t *tOps) open(f *tFile) (ch *cache.Handle, err error) {
-	ch = t.cache.Get(0, uint64(f.fd.Num), func() (size int, value cache.Value) {
+func (t *tOps) open(f *tFile, light bool) (ch *cache.Handle, err error) {
+	cacheKey := uint64(f.fd.Num)
+	if light {
+		// It's fancy, please FIX ME. Now both normal
+		// reader and light reader are mixed together,
+		// in order to distinguish them, the highest bit
+		// is set as 1 for light reader.
+		cacheKey = uint64(1<<63 + uint64(f.fd.Num))
+	}
+	ch = t.cache.Get(0, cacheKey, func() (size int, value cache.Value) {
 		var r storage.Reader
 		r, err = t.s.stor.Open(f.fd)
 		if err != nil {
 			return 0, nil
 		}
-
 		var bcache *cache.NamespaceGetter
 		if t.bcache != nil {
-			bcache = &cache.NamespaceGetter{Cache: t.bcache, NS: uint64(f.fd.Num)}
+			bcache = &cache.NamespaceGetter{Cache: t.bcache, NS: cacheKey}
 		}
-
+		// Open the table reader in the light mode
+		if light {
+			var tr *table.LightReader
+			tr, err = table.NewLightReader(r, f.size, f.imin, f.imax, f.fd, bcache, t.bpool, t.s.o.Options)
+			if err != nil {
+				r.Close()
+				return 0, nil
+			}
+			return 1, tr
+		}
+		// Open the table reader in the normal mode
 		var tr *table.Reader
-		tr, err = table.NewReader(r, f.size, f.fd, bcache, t.bpool, t.s.o.Options)
+		tr, err = table.NewReader(r, f.size, f.fd, bcache, t.bpool, t.s.o.Options, true)
 		if err != nil {
 			r.Close()
 			return 0, nil
 		}
 		return 1, tr
-
 	})
 	if ch == nil && err == nil {
 		err = ErrClosed
@@ -442,7 +458,7 @@ func (t *tOps) open(f *tFile) (ch *cache.Handle, err error) {
 // Finds key/value pair whose key is greater than or equal to the
 // given key.
 func (t *tOps) find(f *tFile, key []byte, ro *opt.ReadOptions) (rkey, rvalue []byte, err error) {
-	ch, err := t.open(f)
+	ch, err := t.open(f, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -452,7 +468,7 @@ func (t *tOps) find(f *tFile, key []byte, ro *opt.ReadOptions) (rkey, rvalue []b
 
 // Finds key that is greater than or equal to the given key.
 func (t *tOps) findKey(f *tFile, key []byte, ro *opt.ReadOptions) (rkey []byte, err error) {
-	ch, err := t.open(f)
+	ch, err := t.open(f, false)
 	if err != nil {
 		return nil, err
 	}
@@ -462,7 +478,7 @@ func (t *tOps) findKey(f *tFile, key []byte, ro *opt.ReadOptions) (rkey []byte, 
 
 // Returns approximate offset of the given key.
 func (t *tOps) offsetOf(f *tFile, key []byte) (offset int64, err error) {
-	ch, err := t.open(f)
+	ch, err := t.open(f, false)
 	if err != nil {
 		return
 	}
@@ -472,11 +488,22 @@ func (t *tOps) offsetOf(f *tFile, key []byte) (offset int64, err error) {
 
 // Creates an iterator from the given table.
 func (t *tOps) newIterator(f *tFile, slice *util.Range, ro *opt.ReadOptions) iterator.Iterator {
-	ch, err := t.open(f)
+	ch, err := t.open(f, false)
 	if err != nil {
 		return iterator.NewEmptyIterator(err)
 	}
 	iter := ch.Value().(*table.Reader).NewIterator(slice, ro)
+	iter.SetReleaser(ch)
+	return iter
+}
+
+// Creates an iterator from the given table.
+func (t *tOps) newLightIterator(f *tFile, slice *util.Range, ro *opt.ReadOptions) iterator.Iterator {
+	ch, err := t.open(f, true)
+	if err != nil {
+		return iterator.NewEmptyIterator(err)
+	}
+	iter := ch.Value().(*table.LightReader).NewIterator(slice, ro)
 	iter.SetReleaser(ch)
 	return iter
 }

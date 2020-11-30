@@ -52,7 +52,7 @@ var _ = testutil.Defer(func() {
 				return db
 			}, func(db testutil.DB) {
 				db.(*testingDB).TestClose()
-			})
+			}, false)
 		})
 
 		Describe("transaction test", func() {
@@ -75,7 +75,7 @@ var _ = testutil.Defer(func() {
 				By("committing first transaction")
 				err = tr.Commit()
 				Expect(err).NotTo(HaveOccurred())
-				testutil.TestIter(db, nil, t0.Present)
+				testutil.TestIter(db, nil, t0.Present, false)
 				testutil.TestGet(db, t0.Present)
 				testutil.TestHas(db, t0.Present)
 
@@ -92,11 +92,11 @@ var _ = testutil.Defer(func() {
 					Present: t0.Present.Clone(),
 				}
 				testutil.DoDBTesting(t1)
-				testutil.TestIter(db, nil, t0.Present)
+				testutil.TestIter(db, nil, t0.Present, false)
 
 				By("discarding second transaction")
 				tr.Discard()
-				testutil.TestIter(db, nil, t0.Present)
+				testutil.TestIter(db, nil, t0.Present, false)
 
 				By("creating third transaction")
 				tr.Transaction, err = db.OpenTransaction()
@@ -107,7 +107,7 @@ var _ = testutil.Defer(func() {
 				By("committing third transaction")
 				err = tr.Commit()
 				Expect(err).NotTo(HaveOccurred())
-				testutil.TestIter(db, nil, t0.Present)
+				testutil.TestIter(db, nil, t0.Present, false)
 
 				db.TestClose()
 				done <- true

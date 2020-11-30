@@ -82,7 +82,7 @@ func TestHas(db Has, kv KeyValue) {
 	})
 }
 
-func TestIter(db NewIterator, r *util.Range, kv KeyValue) {
+func TestIter(db NewIterator, r *util.Range, kv KeyValue, onetime bool) {
 	iter := db.TestNewIterator(r)
 	Expect(iter.Error()).ShouldNot(HaveOccurred())
 
@@ -91,11 +91,15 @@ func TestIter(db NewIterator, r *util.Range, kv KeyValue) {
 		Iter:     iter,
 	}
 
-	DoIteratorTesting(&t)
+	if onetime {
+		DoOneTimeIteratorTesting(&t)
+	} else {
+		DoIteratorTesting(&t)
+	}
 	iter.Release()
 }
 
-func KeyValueTesting(rnd *rand.Rand, kv KeyValue, p DB, setup func(KeyValue) DB, teardown func(DB)) {
+func KeyValueTesting(rnd *rand.Rand, kv KeyValue, p DB, setup func(KeyValue) DB, teardown func(DB), onetime bool) {
 	if rnd == nil {
 		rnd = NewRand()
 	}
@@ -137,7 +141,7 @@ func KeyValueTesting(rnd *rand.Rand, kv KeyValue, p DB, setup func(KeyValue) DB,
 
 	It("Should iterates and seeks correctly", func(done Done) {
 		if db, ok := p.(NewIterator); ok {
-			TestIter(db, nil, kv.Clone())
+			TestIter(db, nil, kv.Clone(), onetime)
 		}
 		done <- true
 	}, 30.0)
@@ -156,7 +160,7 @@ func KeyValueTesting(rnd *rand.Rand, kv KeyValue, p DB, setup func(KeyValue) DB,
 					{&util.Range{Start: nil, Limit: key_}, 0, i},
 				} {
 					By(fmt.Sprintf("Random index of %d .. %d", x.start, x.limit), func() {
-						TestIter(db, x.r, kv.Slice(x.start, x.limit))
+						TestIter(db, x.r, kv.Slice(x.start, x.limit), onetime)
 					})
 				}
 			})
@@ -169,7 +173,7 @@ func KeyValueTesting(rnd *rand.Rand, kv KeyValue, p DB, setup func(KeyValue) DB,
 			RandomRange(rnd, kv.Len(), Min(kv.Len(), 50), func(start, limit int) {
 				By(fmt.Sprintf("Random range of %d .. %d", start, limit), func() {
 					r := kv.Range(start, limit)
-					TestIter(db, &r, kv.Slice(start, limit))
+					TestIter(db, &r, kv.Slice(start, limit), onetime)
 				})
 			})
 		}
@@ -177,7 +181,7 @@ func KeyValueTesting(rnd *rand.Rand, kv KeyValue, p DB, setup func(KeyValue) DB,
 	}, 200.0)
 }
 
-func AllKeyValueTesting(rnd *rand.Rand, body, setup func(KeyValue) DB, teardown func(DB)) {
+func AllKeyValueTesting(rnd *rand.Rand, body, setup func(KeyValue) DB, teardown func(DB), onetime bool) {
 	Test := func(kv *KeyValue) func() {
 		return func() {
 			var p DB
@@ -196,7 +200,7 @@ func AllKeyValueTesting(rnd *rand.Rand, body, setup func(KeyValue) DB, teardown 
 			}
 			KeyValueTesting(rnd, *kv, p, func(KeyValue) DB {
 				return p
-			}, nil)
+			}, nil, onetime)
 		}
 	}
 

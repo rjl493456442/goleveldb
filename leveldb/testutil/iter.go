@@ -233,6 +233,13 @@ func (t *IteratorTesting) SOI() {
 	t.init()
 	t.setAct(IterSOI)
 	Expect(t.Pos).Should(BeNumerically("<=", 0), t.Text())
+	t.post()
+}
+
+func (t *IteratorTesting) SOIWithPrevCheck() {
+	t.init()
+	t.setAct(IterSOI)
+	Expect(t.Pos).Should(BeNumerically("<=", 0), t.Text())
 	for i := 0; i < 3; i++ {
 		t.Prev()
 	}
@@ -240,6 +247,13 @@ func (t *IteratorTesting) SOI() {
 }
 
 func (t *IteratorTesting) EOI() {
+	t.init()
+	t.setAct(IterEOI)
+	Expect(t.Pos).Should(BeNumerically(">=", t.Len()-1), t.Text())
+	t.post()
+}
+
+func (t *IteratorTesting) EOIWithNextCheck() {
 	t.init()
 	t.setAct(IterEOI)
 	Expect(t.Pos).Should(BeNumerically(">=", t.Len()-1), t.Text())
@@ -277,30 +291,23 @@ func (t *IteratorTesting) NextAll() {
 	})
 }
 
-func DoIteratorTesting(t *IteratorTesting) {
+func DoOneTimeIteratorTesting(t *IteratorTesting) {
 	if t.Rand == nil {
 		t.Rand = NewRand()
 	}
 	t.SOI()
-	t.NextAll()
+
 	t.First()
-	t.SOI()
-	t.NextAll()
-	t.EOI()
-	t.PrevAll()
 	t.Last()
 	t.EOI()
-	t.PrevAll()
+
+	t.First()
 	t.SOI()
 
 	t.NextAll()
-	t.PrevAll()
-	t.NextAll()
-	t.Last()
-	t.PrevAll()
-	t.First()
-	t.NextAll()
 	t.EOI()
+	t.PrevAll()
+	t.SOI()
 
 	ShuffledIndex(t.Rand, t.Len(), 1, func(i int) {
 		t.Seek(i)
@@ -318,6 +325,54 @@ func DoIteratorTesting(t *IteratorTesting) {
 		} else {
 			t.NextAll()
 			t.EOI()
+		}
+	})
+	//for _, key := range []string{"foo", "bar", "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"} {
+	//	t.SeekKey([]byte(key))
+	//}
+}
+
+func DoIteratorTesting(t *IteratorTesting) {
+	if t.Rand == nil {
+		t.Rand = NewRand()
+	}
+	t.SOIWithPrevCheck()
+	t.NextAll()
+	t.First()
+	t.SOIWithPrevCheck()
+	t.NextAll()
+	t.EOIWithNextCheck()
+	t.PrevAll()
+	t.Last()
+	t.EOIWithNextCheck()
+	t.PrevAll()
+	t.SOIWithPrevCheck()
+
+	t.NextAll()
+	t.PrevAll()
+	t.NextAll()
+	t.Last()
+	t.PrevAll()
+	t.First()
+	t.NextAll()
+	t.EOIWithNextCheck()
+
+	ShuffledIndex(t.Rand, t.Len(), 1, func(i int) {
+		t.Seek(i)
+	})
+
+	ShuffledIndex(t.Rand, t.Len(), 1, func(i int) {
+		t.SeekInexact(i)
+	})
+
+	ShuffledIndex(t.Rand, t.Len(), 1, func(i int) {
+		t.Seek(i)
+		if i%2 != 0 {
+			t.PrevAll()
+			t.SOIWithPrevCheck()
+		} else {
+			t.NextAll()
+			t.EOIWithNextCheck()
 		}
 	})
 
